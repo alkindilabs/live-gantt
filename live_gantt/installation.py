@@ -105,6 +105,14 @@ def _service_target(system, plugin_root, home, environ):
     return identifier, config_root / "systemd" / "user" / identifier
 
 
+def service_python(which, executable):
+    """The interpreter the service runs: `python3` as found on PATH, kept unresolved so that a
+    package manager moving its versioned binary (Homebrew's Cellar) does not strand the service;
+    else the interpreter running the installer."""
+    found = which("python3")
+    return Path(found) if found else Path(executable)
+
+
 def install(plugin_root):
     """Copy this plugin's package into stable storage and restart its per-user service."""
     system = platform.system()
@@ -114,7 +122,7 @@ def install(plugin_root):
     version = manifest["version"]
     settings = installation_settings(os.environ, _read_settings(directory))
     identifier, target = _service_target(system, plugin_root, home, os.environ)
-    python = Path(sys.executable).resolve()
+    python = service_python(shutil.which, sys.executable)
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".install-", dir=directory) as staging:
         staged_package = Path(staging) / PACKAGE_DIRECTORY

@@ -6,6 +6,7 @@ from live_gantt.installation import (
     installation_directory,
     installation_settings,
     launchd_configuration,
+    service_python,
     systemd_configuration,
 )
 
@@ -14,6 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallationTests(unittest.TestCase):
+    def test_service_python_keeps_the_path_found_unresolved(self):
+        found = "/opt/homebrew/bin/python3"
+        running = "/opt/homebrew/Cellar/python@3.14/3.14.6/bin/python3.14"
+        self.assertEqual(service_python(lambda _name: found, running), Path(found))
+        self.assertEqual(service_python(lambda _name: None, running), Path(running))
+
     def test_installation_directory_by_os_and_xdg_setting(self):
         home = Path("/users/reader")
         cases = (
