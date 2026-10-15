@@ -29,6 +29,7 @@ AGENT_ID_PATTERN = re.compile(r'(?:agentId|agent_id)\s*[":=]+\s*["\s]*([\w-]+)')
 TASK_ID_PATTERN = re.compile(r'(?:task_id|taskId)\s*[":=]+\s*["\s]*([\w-]+)')
 RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
 TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"')
+LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
 def default_root() -> Path:
@@ -61,6 +62,24 @@ def _stat(path: Path) -> os.stat_result | None:
 def _regular_stat(path: Path) -> os.stat_result | None:
     file_stat = _stat(path)
     return file_stat if file_stat and stat.S_ISREG(file_stat.st_mode) else None
+
+
+def _modified(path: Path | None) -> str | None:
+    file_stat = _regular_stat(path) if path else None
+    return _iso(datetime.fromtimestamp(file_stat.st_mtime, UTC)) if file_stat else None
+
+
+def _process_alive(pid: int) -> bool:
+    """Probe a process without signalling it; a permission refusal means it exists.
+
+    Errors other than an absent process count as alive, so a probe never reports a false exit."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError, ValueError):
+        return True
+    return True
 
 
 def _children(path: Path) -> list[Path]:
@@ -311,6 +330,16 @@ class SourceStore:
                 listings.append({**listing, "recent": recent})
             return listings
 
+    def plan(self, list_id: str) -> list[dict[str, Any]]:
+        """Return a session's normalized tasks from its task files alone, without transcript history.
+
+        An unknown or malformed identifier yields an empty plan; nothing outside the task
+        directory is opened except live journals and run logs the tasks name."""
+        with self._lock:
+            if not LIST_ID.fullmatch(list_id):
+                return []
+            return [self._task(path, _Transcript()) for path in self._task_paths(self.root / "tasks" / list_id)]
+
     def state(self, list_id: str, now: datetime) -> dict[str, Any] | None:
         """Return normalized tasks and agents, or None for an undiscovered session identifier."""
         with self._lock:
@@ -327,7 +356,8 @@ class SourceStore:
                 agent_ids = task.pop("agentIds")
                 task["agents"] = [agents[agent_id] for agent_id in agent_ids if agent_id in agents]
                 assigned.update(agent_ids)
-            return {**listing, "tasks": tasks, "agents": [agent for key, agent in agents.items() if key not in assigned], "warnings": warnings}
+            return {**listing, "transcriptUpdatedAt": _modified(session.transcript), "tasks": tasks,
+                    "agents": [agent for key, agent in agents.items() if key not in assigned], "warnings": warnings}
 
     def _sessions(self) -> dict[str, _Session]:
         sessions: dict[str, _Session] = {}
@@ -437,6 +467,7 @@ class SourceStore:
     def _task(self, path: Path, transcript: _Transcript) -> dict[str, Any]:
         warnings: list[str] = []
         document = _read_json(path, warnings)
+        readable = bool(document)
         task_id = _task_id(document.get("id")) or path.stem
         metadata = document.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -467,6 +498,7 @@ class SourceStore:
             "estimate": self._estimate(metadata, warnings), "created": _iso(history.created),
             "started": _iso(history.started), "ended": _iso(history.ended),
             "history": list(history.events), "warnings": warnings,
+            "readable": readable, "updatedAt": _modified(path),
             "agentIds": self._ids(metadata, "agents", warnings),
             "runs": self._runs(metadata, path.parent, warnings),
         }
@@ -571,22 +603,24 @@ class SourceStore:
             started = parse_time(value.get("started"))
             ended = parse_time(value.get("ended"))
             log = value.get("log")
+            pid = value.get("pid")
             invalid = (not isinstance(label, str) or not label or started is None
                        or (value.get("ended") is not None and ended is None)
                        or (ended is not None and started is not None and ended < started)
-                       or (log is not None and (not isinstance(log, str) or not log)))
+                       or (log is not None and (not isinstance(log, str) or not log))
+                       or (pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0)))
             if invalid:
-                warnings.append(f"runs[{index}] has invalid label, timestamps, or log path")
+                warnings.append(f"runs[{index}] has invalid label, timestamps, log path, or pid")
                 continue
-            last_activity = ended or started
+            log_updated = None
             if log:
-                log_stat = _regular_stat(self._path(log, task_dir))
-                if log_stat:
-                    last_activity = datetime.fromtimestamp(log_stat.st_mtime, UTC)
-                else:
+                log_updated = _modified(self._path(log, task_dir))
+                if log_updated is None:
                     warnings.append(f"runs[{index}] log is unavailable")
             runs.append({"label": label, "started": _iso(started), "ended": _iso(ended),
-                         "log": log, "lastActivityAt": _iso(last_activity), "activity": label,
+                         "log": log, "logUpdatedAt": log_updated,
+                         "lastActivityAt": log_updated or _iso(ended or started), "activity": label,
+                         "pid": pid, "pidAlive": None if pid is None or ended else _process_alive(pid),
                          "status": "completed" if ended else "running"})
         return runs
 

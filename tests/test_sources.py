@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -174,6 +176,66 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(task["runs"][0]["status"], "running")
         journal.write_text('{"type":"result"}\n')
         self.assertEqual(self.state()["tasks"][0]["liveProgress"], 35)
+
+    def test_tasks_record_file_change_time_readability_and_transcript_time(self):
+        self.task("1")
+        changed = datetime(2026, 10, 15, 11, 40, tzinfo=timezone.utc).timestamp()
+        os.utime(self.task_dir / "1.json", (changed, changed))
+        (self.task_dir / "2.json").write_text("{not json")
+        self.append({"timestamp": "2026-10-15T11:00:00Z", "type": "user", "message": {"content": "Prompt"}})
+        written = datetime(2026, 10, 15, 11, 58, tzinfo=timezone.utc).timestamp()
+        os.utime(self.transcript, (written, written))
+        state = self.state()
+        tasks = {task["id"]: task for task in state["tasks"]}
+        self.assertEqual(tasks["1"]["updatedAt"], "2026-10-15T11:40:00Z")
+        self.assertTrue(tasks["1"]["readable"])
+        self.assertFalse(tasks["2"]["readable"])
+        self.assertEqual(state["transcriptUpdatedAt"], "2026-10-15T11:58:00Z")
+        self.transcript.unlink()
+        self.assertIsNone(self.state()["transcriptUpdatedAt"])
+
+    def test_plan_reads_task_files_but_not_the_transcript(self):
+        self.task("1")
+        self.append({"timestamp": "2026-10-15T11:00:00Z", "type": "user", "message": {"content": "Prompt"}})
+        opened = []
+        original_open = Path.open
+
+        def record_open(path, *args, **kwargs):
+            opened.append(path)
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", record_open):
+            plan = self.store.plan(self.list_id)
+        self.assertEqual([task["id"] for task in plan], ["1"])
+        self.assertNotIn(self.transcript, opened)
+        self.assertEqual(self.store.plan("unknown-session"), [])
+        self.assertEqual(self.store.plan("../outside"), [])
+
+    def test_runs_record_log_change_time_and_process_liveness(self):
+        log = self.task_dir / "worker.log"
+        log.write_text("working")
+        written = datetime(2026, 10, 15, 11, 50, tzinfo=timezone.utc).timestamp()
+        os.utime(log, (written, written))
+        finished = subprocess.Popen([sys.executable, "-c", "pass"])
+        finished.wait()
+        started = "2026-10-15T11:00:00Z"
+        self.task(metadata={"runs": [
+            {"label": "Logged", "started": started, "ended": None, "log": "worker.log", "pid": os.getpid()},
+            {"label": "Lost log", "started": started, "ended": None, "log": "missing.log"},
+            {"label": "Exited", "started": started, "ended": None, "log": None, "pid": finished.pid},
+            {"label": "Bad pid", "started": started, "ended": None, "log": None, "pid": True},
+        ]})
+        task = self.state()["tasks"][0]
+        runs = {run["label"]: run for run in task["runs"]}
+        self.assertEqual(set(runs), {"Logged", "Lost log", "Exited"})
+        self.assertEqual(runs["Logged"]["logUpdatedAt"], "2026-10-15T11:50:00Z")
+        self.assertIs(runs["Logged"]["pidAlive"], True)
+        self.assertEqual(runs["Logged"]["pid"], os.getpid())
+        self.assertIsNone(runs["Lost log"]["logUpdatedAt"])
+        self.assertIsNone(runs["Lost log"]["pid"])
+        self.assertIsNone(runs["Lost log"]["pidAlive"])
+        self.assertIs(runs["Exited"]["pidAlive"], False)
+        self.assertIn("runs[3] has invalid label, timestamps, log path, or pid", task["warnings"])
 
     def test_lists_use_custom_title_and_include_transcript_only_session(self):
         self.task()

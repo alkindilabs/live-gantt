@@ -15,7 +15,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from .schedule import project
-from .sources import SourceStore
+from .sources import LIST_ID, SourceStore
 
 
 DEFAULT_PORT = 4791
@@ -27,7 +27,6 @@ STATIC = Path(__file__).with_name("static")
 STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                 "/style.css": ("style.css", "text/css; charset=utf-8"),
                 "/app.js": ("app.js", "text/javascript; charset=utf-8")}
-LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
 def _favicon():
