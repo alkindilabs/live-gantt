@@ -17,7 +17,7 @@
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>ProcessType</key><string>Background</string>
+    <key>ProcessType</key><string>Standard</string>
     <key>Nice</key><integer>10</integer>
     <key>LowPriorityIO</key><true/>
 </dict>

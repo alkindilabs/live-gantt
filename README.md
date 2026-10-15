@@ -22,7 +22,7 @@ For login startup on macOS, run:
 ./launchd/install.sh
 ```
 
-The installer renders [the plist template](launchd/local.live-gantt.plist), registers `local.live-gantt` in your user launchd domain, and points it at this checkout and Homebrew Python. It sets background process priority, niceness 10 and low-priority input/output. Output goes to `live-gantt.log` in your user Library's Logs directory. An explicitly set `CLAUDE_CONFIG_DIR` is captured during installation. Reinstall after moving the checkout or changing that setting.
+The installer renders [the plist template](launchd/local.live-gantt.plist), registers `local.live-gantt` in your user launchd domain, and points it at this checkout and Homebrew Python. It runs as a standard process at niceness 10 with low-priority input/output; it does no work until a chart is open. Output goes to `live-gantt.log` in your user Library's Logs directory. An explicitly set `CLAUDE_CONFIG_DIR` is captured during installation. Reinstall after moving the checkout or changing that setting.
 
 ```sh
 ./launchd/uninstall.sh
