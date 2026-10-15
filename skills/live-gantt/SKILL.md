@@ -20,7 +20,7 @@ Agents write these fields through Claude Code's task metadata. Live Gantt never 
 | `estimate` | Set before starting or queueing every schedulable task; revise when scope changes. Object with finite elapsed hours `low`, `likely`, `high`, satisfying `0 <= low <= likely <= high`. No default estimate is invented. |
 | `lane` | Set the serial work stream when creating every schedulable task; distinct lanes can run in parallel. Row group; defaults to the milestone, otherwise Main. |
 | `agents` | Update after starting background agents that belong to this task. List of subagent identifiers, without the `agent-` filename prefix or file suffix. Matching agents become thin bars under the task. Unassigned agents remain in the Agents lane. |
-| `runs` | Update when an external process starts or ends. List of objects with a text `label`, International Organization for Standardization (ISO) 8601 `started`, `ended` timestamp or `null`, and `log` path or `null`. The end cannot precede the start. A null end means live; the log modification time provides the last activity. |
+| `runs` | Update when an external process starts or ends. List of objects with a text `label`, International Organization for Standardization (ISO) 8601 `started`, `ended` timestamp or `null`, `log` path or `null`, and an optional positive integer `pid` of the process. The end cannot precede the start. A null end means live; the log modification time provides the last activity. |
 
 `blockedBy` belongs to the task itself, not its metadata. It is a list of prerequisite task identifiers. Set dependencies with `TaskUpdate(addBlockedBy=[...])`. Work in one lane is serialized in task identifier order; explicit blockers express dependencies across lanes. Add blockers before starting dependent work. Missing blockers and dependency cycles prevent forecasting.
 
@@ -50,6 +50,18 @@ Example metadata for a task whose implementation has begun:
 The Program Evaluation and Review Technique (PERT) estimate is `E = (low + 4 * likely + high) / 6`, with standard deviation `sd = (high - low) / 6`. For a running task, `p = max(progress, live share) / 100`; remaining time is `E * (1 - p)`. A task past its expected elapsed duration with zero progress is marked overrunning, but its forecast still follows that remaining-time rule.
 
 Milestone completion is the weighted share: completed tasks count fully, in-progress tasks count their explicit `progress`, and pending tasks count zero. The 50th-percentile (P50) forecast uses expected remaining durations. The 90th-percentile (P90) forecast adds `1.2816 * sqrt(sum of remaining variances)` along each controlling dependency chain, then takes the latest end. Remaining standard deviations scale by `1 - p`. These are planning approximations, not calibrated probabilities. Missing estimates, missing blockers and dependency cycles produce unknown forecasts. Completed tasks with no history do not block future work. Estimates extending beyond the representable calendar produce warnings.
+
+## Freshness
+
+The plan must never be silently stale. Live Gantt reports a finding when:
+
+1. an unfinished task lacks a valid `estimate` or a `lane`;
+2. an in-progress task has not been updated for 15 minutes while the session is active (its transcript changed in the last 5 minutes);
+3. an in-progress task has no numeric `progress`;
+4. a run without `ended` names a `log` that is missing, or that has not changed for 10 minutes while the session is active;
+5. a run without `ended` declares a `pid` that is no longer running, and its log, if any, shows no life.
+
+A Stop hook blocks the end of a turn while findings exist (at most once per 5 minutes), and prompts and tool calls carry a reminder. Fix each finding with TaskUpdate: set the missing fields, record real progress, or close a run that finished, failed or hung by setting its `ended` time. Updating progress only to silence a reminder makes the chart lie; record what was observed.
 
 ## Two parallel lanes
 
@@ -117,4 +129,4 @@ Before starting a process that belongs to task `3`, mark the task in progress. A
 }
 ```
 
-When the process exits, replace that run's `ended` with the actual completion timestamp, for example `2026-10-15T10:18:00Z`, preserving its label, start and log. Preserve other runs when sending the updated list. Close failed or cancelled runs too; retain the task as in progress if corrective work remains and describe the result in the task. Mark the task completed only when all its work is done. A quiet log does not close a run.
+Record the process identifier as `pid` when you have it, so an exited process is noticed even if it never writes a log. When the process exits, replace that run's `ended` with the actual completion timestamp, for example `2026-10-15T10:18:00Z`, preserving its label, start and log. Preserve other runs when sending the updated list. Close failed or cancelled runs too; retain the task as in progress if corrective work remains and describe the result in the task. Mark the task completed only when all its work is done. A quiet log does not close a run.

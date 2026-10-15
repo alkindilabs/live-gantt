@@ -14,7 +14,7 @@ This repository is both the plugin and its one-plugin marketplace. Nothing is pu
 /live-gantt:open
 ```
 
-The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing.
+The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing, and its freshness hooks keep the plan from going stale (see [Freshness](#freshness)).
 
 Installation copies the application out of the replaceable plugin cache into stable per-user storage:
 
@@ -63,6 +63,28 @@ Running bars end at now and have a patterned projection for the remaining estima
 
 The default view is **12 h**, with now one quarter of the way across the visible chart. Use **12 h**, **3 days**, **Week** or **Fit**; the browser remembers your choice when local storage is available. The view follows now until you scroll horizontally; **Follow now** resumes it. Milestones with estimated remaining work use compact cards showing completion share and forecasts. Finished milestones share a **Done** line; milestones with no estimated remaining tasks share an **Unestimated** line. Hover or focus a task label to inspect its description, metadata, estimate and history; click to keep details open. Escape closes details. Connection age updates continuously; the browser reconnects after a disconnection. There is no animation when reduced motion is enabled.
 
+## Freshness
+
+The chart is only useful if it is never silently out of date, so one set of rules judges every session, in [freshness.py](live_gantt/freshness.py). A finding is reported when:
+
+1. an unfinished task lacks a valid `estimate` or a `lane`;
+2. an in-progress task file has not changed for 15 minutes while the session transcript changed within the last 5 minutes;
+3. an in-progress task has no numeric `progress`;
+4. a run that has not ended names a `log` that is missing, or whose log has not changed for 10 minutes while the session is active;
+5. a run that has not ended declares a `pid` that no longer exists, and its log, if it has one, shows no life.
+
+Completed and deleted tasks and task files that cannot be read never produce findings. When findings exist, the page shows a red banner listing them; each in-progress task shows how long ago it was updated and, for a run finding, what was declared against what was observed, for example `declared running; observed: silent 23 min`.
+
+The plugin enforces the same rules with [its freshness hook](hooks/freshness.py) on three events:
+
+| Event | Behaviour |
+| --- | --- |
+| `Stop` | Blocks the end of a turn with one paragraph naming each finding, at most once per 5 minutes per session, and never while a stop hook is already active. |
+| `UserPromptSubmit` | Adds the same paragraph as context on each prompt while findings exist. |
+| `PostToolUse` (every tool) | Adds the same paragraph as context at most once per 5 minutes; inside that window it reads only its own state file. |
+
+These hooks only read local files: the session's task files, its transcript's modification time and the logs its runs name. They probe declared process identifiers with signal zero, which delivers no signal. They print to the session and write only one small state file per session, holding the last block and reminder times, under the plugin data directory (`CLAUDE_PLUGIN_DATA`, or the application directory above when unset). They never write tasks or transcripts, send nothing anywhere, and stay silent when they cannot read the task files or record their state.
+
 ## Task planning
 
 Load the [live-gantt skill](skills/live-gantt/SKILL.md) when creating or updating a multi-step plan, or starting agents and external runs attached to it. That is the task-metadata contract, including field guidance, a two-lane plan and the external-run lifecycle. The chart never writes task metadata itself.
@@ -74,11 +96,13 @@ The page uses read-only Hypertext Transfer Protocol (HTTP) endpoints:
 | Endpoint | Response |
 | --- | --- |
 | `/api/lists` | `{ "lists": [...] }`, ordered by recent source change. Each entry includes a `recent` flag; older entries carry identifier/date with an identifier title and empty project. |
-| `/api/state?list=ID` | Full selected-session model with tasks, agents, milestones, warnings and an `observedAt` projection timestamp; an unknown list returns 404. |
+| `/api/state?list=ID` | Full selected-session model with tasks, agents, milestones, warnings, `freshness`, `transcriptUpdatedAt` and an `observedAt` projection timestamp; an unknown list returns 404. |
 | `/events?list=ID` | Server-Sent Events (SSE): `state` on selected-source changes, `lists` when the picker changes, and a `heartbeat` event plus comment every 15 seconds. A removed session emits `missing`. |
 | `/favicon.ico` | Inline Scalable Vector Graphics (SVG) Gantt icon using the page's color tokens. |
 
-Sources are checked every two seconds only while an event stream is connected, or on explicit page/API requests. State events carry full models; unchanged sources do not emit state events. The browser advances now-dependent dates between updates. A fresh state request always recalculates the projection.
+`freshness` is `{stale, findings, sinceChangeSeconds, sessionActive}`. Each finding has `rule` (`missing-schedule`, `stale-progress`, `missing-progress`, `silent-run` or `process-gone`), `taskId` and a plain-sentence `message`; run findings add `observed`, such as `silent 23 min`, `log not found` or `process gone`. `sinceChangeSeconds` counts from the newest task-file change and is `null` without task files. Each task carries `updatedAt`, its file's modification time, and `readable`. Each run carries `logUpdatedAt`, `pid` and `pidAlive`, which is `null` without a `pid` or once the run has ended.
+
+Sources are checked every two seconds only while an event stream is connected, or on explicit page/API requests. State events carry full models; unchanged sources do not emit state events, except when the freshness verdict changes with time alone. The browser advances now-dependent dates between updates. A fresh state request always recalculates the projection.
 
 ```sh
 python3 -B -m unittest
