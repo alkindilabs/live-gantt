@@ -12,13 +12,25 @@ const CONNECTION_STALE_AFTER = 40 * SECOND;
 const DISCOVERY_RETRY_DELAY = 3 * SECOND;
 const MINIMUM_PLOT_WIDTH = 540;
 const MINIMUM_BAR_WIDTH = 3;
+const BAR_LABEL_GAP = 7;
 const DESIRED_TICK_WIDTH = 100;
+const DEFAULT_ZOOM = "12h";
+const ZOOM_STORAGE_KEY = "live-gantt.zoom";
 const TICK_STEPS = [15 * MINUTE, 30 * MINUTE, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
 const ZOOMS = {
   "12h": { span: 12 * HOUR, pixels: 1008 },
   "3d": { span: 3 * DAY, pixels: 1440 },
   week: { span: 7 * DAY, pixels: 1512 },
 };
+
+function savedZoom() {
+  try {
+    const zoom = localStorage.getItem(ZOOM_STORAGE_KEY);
+    if (zoom === "fit" || Object.hasOwn(ZOOMS, zoom)) return zoom;
+  } catch {}
+  return DEFAULT_ZOOM;
+}
+
 const elements = Object.fromEntries(
   ["session", "project", "connection", "connection-text", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
@@ -27,7 +39,8 @@ const state = {
   lists: [],
   selected: null,
   stream: null,
-  zoom: "fit",
+  zoom: savedZoom(),
+  showOlder: false,
   follow: true,
   connected: false,
   lastReceived: null,
@@ -98,19 +111,38 @@ function renderLists(lists) {
   state.lists = Array.isArray(lists) ? lists : [];
   elements.session.replaceChildren();
   if (!state.lists.length) {
-    elements.session.append(node("option", "", "No recent sessions"));
+    elements.session.append(node("option", "", "No sessions"));
     elements.session.disabled = true;
     return;
   }
   elements.session.disabled = false;
-  for (const list of state.lists) {
-    const title = list.title || list.id;
-    const option = node("option", "", title);
+  if (state.lists.some(list => list.id === state.selected && !list.recent)) state.showOlder = true;
+  if (!state.selected && !state.lists.some(list => list.recent)) {
+    const placeholder = node("option", "", "Choose a session");
+    placeholder.value = "";
+    placeholder.disabled = true;
+    elements.session.append(placeholder);
+  }
+  const recent = state.lists.filter(list => list.recent);
+  const older = state.lists.filter(list => !list.recent);
+  for (const list of [...recent, ...(state.showOlder ? older : [])]) {
+    const identity = list.id === state.selected && state.model ? state.model : list;
+    const title = identity.title || list.id;
+    const updated = timestamp(list.updatedAt);
+    const date = updated === null ? "Unknown date" : new Date(updated).toLocaleDateString();
+    const option = node("option", "", list.recent ? title : `${title} · ${date}`);
     option.value = list.id;
-    option.title = `${title}${list.project ? ` · ${list.project}` : ""}`;
+    option.title = `${title}${identity.project ? ` · ${identity.project}` : ""}`;
     elements.session.append(option);
   }
+  if (older.length && !state.showOlder) {
+    const reveal = node("option", "", "Show older sessions");
+    reveal.value = "";
+    reveal.dataset.action = "show-older";
+    elements.session.append(reveal);
+  }
   if (state.lists.some(list => list.id === state.selected)) elements.session.value = state.selected;
+  else elements.session.selectedIndex = 0;
 }
 
 function closeStream() {
@@ -163,6 +195,8 @@ function selectSession(id) {
     if (state.stream !== stream) return;
     parseEvent(event, model => {
       state.model = model;
+      if (!state.lists.find(list => list.id === id)?.recent) state.showOlder = true;
+      renderLists(state.lists);
       renderModel();
     });
   });
@@ -301,7 +335,8 @@ function showDetails(item, kind, pinned = false, key = null) {
   content.append(node("h2", "", heading));
   if (item.description && item.description !== heading) content.append(node("p", "", item.description));
   const fields = node("dl");
-  detailField(fields, "Status", titleCase(item.status));
+  detailField(fields, "Status", kind === "task" ? taskState(item) : titleCase(item.status));
+  detailField(fields, "Waiting", kind === "task" && item.queued ? waitingLabel(item) : undefined);
   detailField(fields, "Task", kind === "task" ? item.id : undefined);
   detailField(fields, "Lane", item.lane);
   detailField(fields, "Milestone", item.milestone);
@@ -353,13 +388,22 @@ function isOverrun(task, now) {
   return deadline !== null && now > deadline;
 }
 
+function taskState(task, now = Date.now()) {
+  return isOverrun(task, now) ? "Overrun" : task.blocked ? "Blocked" : task.queued ? "Queued" : titleCase(task.status);
+}
+
 function taskSubtitle(task, now = Date.now()) {
-  const labels = [isOverrun(task, now) ? "Overrun" : task.blocked ? "Blocked" : titleCase(task.status)];
+  const labels = [taskState(task, now)];
+  if (task.queued) labels.push(waitingLabel(task));
   if (task.status === "in_progress") labels.push(percent(task.effectiveProgress ?? task.progress));
   if (task.estimateMean !== null && task.estimateMean !== undefined) labels.push(hours(task.estimateMean));
   if (task.warnings?.length) labels.push("Warning");
   if (task.markers?.length) labels.push(...task.markers);
   return labels.join(" · ");
+}
+
+function waitingLabel(task) {
+  return `after ${task.waitingFor.map(id => `#${id}`).join(", ")}`;
 }
 
 function renderTask(task) {
@@ -398,8 +442,17 @@ function createBar(track, className, start, end, text, pulse = false) {
   bar.style.left = `${left}px`;
   bar.style.width = `${Math.max(MINIMUM_BAR_WIDTH, right - left)}px`;
   if (pulse) bar.append(node("span", "live-dot"));
-  if (text) bar.append(document.createTextNode(text));
   track.append(bar);
+  if (text) {
+    const label = node("span", "bar-label", text);
+    track.append(label);
+    const dotWidth = pulse ? bar.querySelector(".live-dot").offsetWidth + BAR_LABEL_GAP : 0;
+    const labelWidth = label.offsetWidth;
+    const fits = labelWidth + dotWidth + BAR_LABEL_GAP * 2 <= bar.clientWidth;
+    const insideOffset = bar.clientWidth - labelWidth - BAR_LABEL_GAP;
+    const outsideOffset = bar.offsetWidth + BAR_LABEL_GAP;
+    label.style.left = `${left + (fits ? insideOffset : outsideOffset)}px`;
+  }
   return bar;
 }
 
@@ -416,10 +469,11 @@ function paintTask(track, task, now) {
     else track.append(node("span", "row-marker", "No history"));
     if (projectedEnd !== null && projectedEnd > now) createBar(track, "projected projected-tail", now, projectedEnd, "Projected");
   } else if (projectedStart !== null && projectedEnd !== null) {
-    createBar(track, task.blocked ? "blocked" : "projected", projectedStart, projectedEnd, task.blocked ? "Blocked" : "Projected");
+    createBar(track, task.queued ? "projected queued" : "projected", projectedStart, projectedEnd, task.queued ? waitingLabel(task) : "Projected");
   }
   if (task.status !== "completed" && projectedEnd === null) {
-    const marker = node("span", "row-marker warning", (task.markers || []).join(" · ") || "Unestimated");
+    const reason = (task.markers || []).join(" · ") || (task.blocked ? "unresolved prerequisite" : "Unestimated");
+    const marker = node("span", `row-marker ${task.blocked ? "blocked-marker" : "warning"}`, `${task.blocked ? "Blocked · " : ""}${reason}`);
     if (started !== null) marker.style.left = `${Math.max(10, Math.min(state.plotWidth - 140, xPosition(now) + 10))}px`;
     track.append(marker);
   }
@@ -431,18 +485,13 @@ function paintChild(track, item, now) {
   const live = item.status === "running";
   const className = live ? "running" : item.status === "silent" ? "silent" : item.status === "completed" ? "done" : "blocked";
   const latest = end ?? (live || item.status === "silent" ? now : timestamp(item.lastActivityAt));
-  const bar = createBar(track, className, start, latest, "", live);
-  if (bar && item.activity) {
-    const activity = node("span", "activity", item.activity);
-    activity.style.left = `${Math.max(0, Math.min(state.plotWidth - 150, xPosition(latest) + 7))}px`;
-    track.append(activity);
-  }
+  createBar(track, className, start, latest, item.activity, live);
 }
 
 function paintTimeline(now) {
   if (!state.range) return;
   for (const { track, item, kind, subtitle } of state.tracks) {
-    for (const old of track.querySelectorAll(".bar, .row-marker, .activity")) old.remove();
+    for (const old of track.querySelectorAll(".bar, .bar-label, .row-marker")) old.remove();
     if (kind === "task") {
       paintTask(track, item, now);
       subtitle.textContent = taskSubtitle(item, now);
@@ -458,19 +507,21 @@ function paintTimeline(now) {
 function renderMilestones(now) {
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
+  const cards = node("div", "milestone-cards");
+  const done = [];
+  const unestimated = [];
   for (const milestone of state.model.milestones || []) {
+    if (!milestone.hasRemaining) {
+      done.push(milestone.name);
+      continue;
+    }
+    if (!milestone.hasEstimate) {
+      unestimated.push(milestone.name);
+      continue;
+    }
     const card = node("article", "milestone");
     const heading = node("div", "milestone-heading");
     heading.append(node("h2", "", milestone.name || "Ungrouped"), node("span", "milestone-percentage", percent(milestone.progress)));
-    const progress = node("div", "progress-track");
-    progress.setAttribute("role", "progressbar");
-    progress.setAttribute("aria-label", `${milestone.name || "Ungrouped"} completion`);
-    progress.setAttribute("aria-valuemin", "0");
-    progress.setAttribute("aria-valuemax", "100");
-    progress.setAttribute("aria-valuenow", number(milestone.progress));
-    const fill = node("div", "progress-fill");
-    fill.style.width = percent(milestone.progress);
-    progress.append(fill);
     const dates = node("div", "milestone-dates");
     for (const [key, title] of [["p50", "P50"], ["p90", "P90"]]) {
       const field = node("span", "", `${title} `);
@@ -480,9 +531,12 @@ function renderMilestones(now) {
       dates.append(field);
       state.milestoneDates.push({ node: value, milestone, key });
     }
-    card.append(heading, progress, dates);
-    elements.milestones.append(card);
+    card.append(heading, dates);
+    cards.append(card);
   }
+  if (cards.childElementCount) elements.milestones.append(cards);
+  if (done.length) elements.milestones.append(node("p", "milestone-summary", `Done: ${done.join(", ")}`));
+  if (unestimated.length) elements.milestones.append(node("p", "milestone-summary", `Unestimated: ${unestimated.join(", ")}`));
   paintMilestones(now);
 }
 
@@ -585,17 +639,29 @@ function tick() {
   paintMilestones(now);
 }
 
-elements.session.addEventListener("change", () => selectSession(elements.session.value));
+elements.session.addEventListener("change", () => {
+  if (elements.session.selectedOptions[0]?.dataset.action === "show-older") {
+    state.showOlder = true;
+    renderLists(state.lists);
+  } else if (elements.session.value) selectSession(elements.session.value);
+});
 elements.follow.addEventListener("click", () => {
   state.follow = !state.follow;
   renderFollow();
   if (state.follow && state.model) renderTimeline(Date.now(), true);
 });
+function renderZoom() {
+  for (const button of document.querySelectorAll("[data-zoom]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.zoom === state.zoom));
+  }
+}
+
 for (const button of document.querySelectorAll("[data-zoom]")) {
   button.addEventListener("click", () => {
     state.zoom = button.dataset.zoom;
     state.follow = true;
-    for (const other of document.querySelectorAll("[data-zoom]")) other.setAttribute("aria-pressed", String(other === button));
+    try { localStorage.setItem(ZOOM_STORAGE_KEY, state.zoom); } catch {}
+    renderZoom();
     renderFollow();
     if (state.model) renderTimeline(Date.now(), true);
   });
@@ -633,13 +699,16 @@ async function start() {
     if (!response.ok) throw new Error("Session discovery failed");
     const result = await response.json();
     renderLists(result.lists);
-    if (state.lists.length) selectSession(state.lists[0].id);
-    else setNotice("No recent sessions found. Start a Claude Code session with tasks, then refresh this page.");
+    const firstRecent = state.lists.find(list => list.recent);
+    if (firstRecent) selectSession(firstRecent.id);
+    else if (state.lists.length) setNotice("Choose Show older sessions to browse earlier work.");
+    else setNotice("No sessions found. Start a Claude Code session with tasks, then refresh this page.");
   } catch {
     setNotice("Cannot reach the local server. Retrying…");
     window.setTimeout(start, DISCOVERY_RETRY_DELAY);
   }
 }
 
+renderZoom();
 window.setInterval(tick, SECOND);
 start();

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
     <title>Live Gantt</title>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <link rel="stylesheet" href="/style.css">
     <script src="/app.js" defer></script>
   </head>
@@ -32,7 +33,7 @@
             <button type="button" data-zoom="12h" aria-pressed="false">12 h</button>
             <button type="button" data-zoom="3d" aria-pressed="false">3 days</button>
             <button type="button" data-zoom="week" aria-pressed="false">Week</button>
-            <button type="button" data-zoom="fit" aria-pressed="true">Fit</button>
+            <button type="button" data-zoom="fit" aria-pressed="false">Fit</button>
           </div>
           <button id="follow" class="follow" type="button" aria-pressed="true">Following now</button>
           <span id="task-count" class="task-count"></span>
@@ -41,6 +42,7 @@
           <span><i class="legend-swatch done" aria-hidden="true"></i>Done</span>
           <span><i class="legend-swatch running" aria-hidden="true"></i>Running</span>
           <span><i class="legend-swatch projected" aria-hidden="true"></i>Projected</span>
+          <span><i class="legend-swatch projected" aria-hidden="true"></i>Queued</span>
           <span><i class="legend-swatch overrun" aria-hidden="true"></i>Overrun</span>
           <span><i class="legend-swatch blocked" aria-hidden="true"></i>Blocked</span>
           <span><i class="legend-swatch silent" aria-hidden="true"></i>Silent</span>

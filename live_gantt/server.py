@@ -30,6 +30,20 @@ STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
 LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
 
+def _favicon():
+    stylesheet = (STATIC / "style.css").read_text(encoding="utf-8")
+    done, running = (
+        re.search(rf"--{token}:\s*(#[0-9a-fA-F]+);", stylesheet).group(1)
+        for token in ("done", "running")
+    )
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+        f'<rect x="3" y="6" width="19" height="8" rx="2" fill="{done}"/>'
+        f'<rect x="11" y="18" width="18" height="8" rx="2" fill="{running}"/>'
+        '</svg>'
+    ).encode("utf-8")
+
+
 def encode_json(value):
     """Encode a model as compact, standards-compliant UTF-8 JSON."""
     return json.dumps(value, ensure_ascii=False, allow_nan=False,
@@ -196,6 +210,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path in STATIC_FILES:
             filename, content_type = STATIC_FILES[url.path]
             self._send((STATIC / filename).read_bytes(), content_type, head)
+        elif url.path == "/favicon.ico":
+            self._send(_favicon(), "image/svg+xml", head)
         elif url.path == "/api/lists":
             self._send(encode_json({"lists": self.server.monitor.lists()}),
                        "application/json; charset=utf-8", head)
