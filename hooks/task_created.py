@@ -2,9 +2,13 @@
 
 import json
 import sys
+from pathlib import Path
 
 
-REQUIRED_FIELDS = ("estimate", "lane")
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PLUGIN_ROOT))
+
+from live_gantt.freshness import SCHEDULING_FIELDS
 
 
 def main() -> None:
@@ -27,7 +31,7 @@ def main() -> None:
         subject = task.get("subject")
         if not isinstance(task_id, str) or not isinstance(subject, str):
             return
-        missing = [field for field in REQUIRED_FIELDS if metadata.get(field) is None]
+        missing = [field for field in SCHEDULING_FIELDS if metadata.get(field) is None]
         if not missing:
             return
         fields = " and ".join(f"`{field}`" for field in missing)
