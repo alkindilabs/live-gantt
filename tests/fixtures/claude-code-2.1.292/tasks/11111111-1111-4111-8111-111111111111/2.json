@@ -1,0 +1,24 @@
+{
+  "id": "2",
+  "subject": "Build the widget",
+  "description": "Implement the agreed widget behavior.",
+  "activeForm": "Building the widget",
+  "status": "in_progress",
+  "blocks": [
+    "3"
+  ],
+  "blockedBy": [
+    "1"
+  ],
+  "metadata": {
+    "weight": 2,
+    "milestone": "Release",
+    "progress": 50,
+    "estimate": {
+      "low": 2,
+      "likely": 2,
+      "high": 2
+    },
+    "lane": "Build"
+  }
+}

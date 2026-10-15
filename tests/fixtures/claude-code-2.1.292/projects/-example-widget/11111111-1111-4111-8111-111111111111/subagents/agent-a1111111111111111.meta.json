@@ -1,0 +1,9 @@
+{
+  "agentType": "general-purpose",
+  "description": "Check widget design",
+  "toolUseId": "toolu_fixture_9",
+  "spawnDepth": 1,
+  "requestShape": "agent",
+  "requestNonInteractive": false,
+  "model": "claude-example-1"
+}

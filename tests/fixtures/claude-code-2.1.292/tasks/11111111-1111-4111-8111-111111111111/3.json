@@ -1,0 +1,22 @@
+{
+  "id": "3",
+  "subject": "Review the widget",
+  "description": "Review the finished implementation.",
+  "activeForm": "Reviewing the widget",
+  "status": "pending",
+  "blocks": [],
+  "blockedBy": [
+    "2"
+  ],
+  "metadata": {
+    "weight": 1,
+    "milestone": "Release",
+    "progress": 0,
+    "estimate": {
+      "low": 1,
+      "likely": 1,
+      "high": 1
+    },
+    "lane": "Design"
+  }
+}

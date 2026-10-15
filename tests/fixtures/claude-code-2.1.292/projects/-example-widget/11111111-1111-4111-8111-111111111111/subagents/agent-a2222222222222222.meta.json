@@ -1,0 +1,9 @@
+{
+  "agentType": "general-purpose",
+  "description": "Inspect release assets",
+  "toolUseId": "toolu_fixture_15",
+  "spawnDepth": 1,
+  "requestShape": "agent",
+  "requestNonInteractive": false,
+  "model": "claude-example-1"
+}

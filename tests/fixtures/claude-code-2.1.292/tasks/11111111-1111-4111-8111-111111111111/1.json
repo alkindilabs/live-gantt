@@ -1,0 +1,25 @@
+{
+  "id": "1",
+  "subject": "Design the widget",
+  "description": "Specify the widget behavior.",
+  "activeForm": "Designing the widget",
+  "status": "completed",
+  "blocks": [
+    "2"
+  ],
+  "blockedBy": [],
+  "metadata": {
+    "weight": 1,
+    "milestone": "Release",
+    "progress": 100,
+    "estimate": {
+      "low": 1,
+      "likely": 1,
+      "high": 1
+    },
+    "lane": "Design",
+    "agents": [
+      "a1111111111111111"
+    ]
+  }
+}
