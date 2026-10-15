@@ -183,7 +183,10 @@ class SourceStoreTests(unittest.TestCase):
         (title_dir / "custom-title.json").write_text(json.dumps({"customTitle": "Live chart"}))
         other = self.project_dir / "other-session.jsonl"
         self.append({"timestamp": "2026-10-15T11:30:00Z", "type": "user", "cwd": "/example/other", "message": {"content": "Another prompt"}}, path=other)
-        os.utime(other, (self.now.timestamp() + 1, self.now.timestamp() + 1))
+        earlier, later = self.now.timestamp() - 1, self.now.timestamp() + 1
+        for path in (self.task_dir / "1.json", self.transcript):
+            os.utime(path, (earlier, earlier))
+        os.utime(other, (later, later))
         lists = self.store.lists()
         self.assertEqual(lists[0]["id"], "other-session")
         by_id = {session["id"]: session for session in lists}
