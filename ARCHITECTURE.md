@@ -1,0 +1,13 @@
+# Architecture
+
+## Sources and ownership
+
+[sources.py](live_gantt/sources.py) owns discovery, source validation and transcript reconstruction. `SourceStore` is a stateful data record holding byte offsets and parsed history, with serialized access. It reads Claude Code's configuration root selected by `CLAUDE_CONFIG_DIR`, falling back to the standard per-user directory. Task files are the authoritative current plan. Parent transcripts provide task creation, the first start, the last completion and progress history. Deleted task files disappear from the plan even when their history remains in the transcript.
+
+Sessions are the union of task list directories and parent transcripts. Picker ordering uses parent transcript and task-file modification times. Discovery obtains title and working directory from a bounded prefix; selected-session reads reconstruct the full transcript and can recover identity after that prefix. A custom title overrides the first user prompt. The discovery scan avoids reading every project's entire transcript.
+
+Parent and subagent transcripts are scanned by byte offset. Complete records are consumed, including a valid final record without a newline; an incomplete trailing record waits for an append. A shrink, file replacement or same-length rewrite resets the cache. Relevant substrings are checked before decoding records, while timestamps are extracted for activity tracking. Malformed records are skipped. This makes normal polling proportional to appended data; the first selected-session read still scans its history.
+
+Subagent metadata supplies descriptions and roles; their transcripts supply first/last activity and the latest tool description or name. Parent task notifications determine terminal state, with background-task-to-agent aliases recovered from tool results when available. Without a terminal notification, an agent becomes silent after 30 minutes. Task metadata assigns agents to task sub-bars; unassigned agents are left for the browser to filter to its visible window. External runs remain live until explicitly ended, with log modification time as their latest activity. Journals are scanned incrementally for finished result lines. All source paths are read-only; journal/log paths resolve relative to the task directory unless absolute or home-relative.
+
+Each known metadata field validates independently and reports warnings on its task. Invalid estimates stay unknown, invalid weights revert to one, and invalid progress reverts to zero. Unknown keys carry no scheduling meaning. Normalized records, including sanitized metadata, form the boundary to projection and transport.
