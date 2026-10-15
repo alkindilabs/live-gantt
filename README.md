@@ -86,7 +86,7 @@ The page uses read-only Hypertext Transfer Protocol (HTTP) endpoints:
 
 | Endpoint | Response |
 | --- | --- |
-| `/api/lists` | `{ "lists": [...] }`, ordered by recent source change. |
+| `/api/lists` | `{ "lists": [...] }`, ordered by recent source change. Each entry includes a `recent` flag; older entries carry identifier/date with an identifier title and empty project. |
 | `/api/state?list=ID` | Full selected-session model with tasks, agents, milestones, warnings and an `observedAt` projection timestamp; an unknown list returns 404. |
 | `/events?list=ID` | Server-Sent Events (SSE): `state` on selected-source changes, `lists` when the picker changes, and a `heartbeat` event plus comment every 15 seconds. A removed session emits `missing`. |
 

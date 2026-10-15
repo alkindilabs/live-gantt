@@ -16,6 +16,7 @@ from typing import Any
 
 UTC = timezone.utc
 SILENT_AFTER = timedelta(minutes=30)
+RECENT_SESSION_WINDOW = timedelta(days=14)
 IDENTITY_SCAN_BYTES = 1024 * 1024
 IDENTITY_SCAN_LINES = 128
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
@@ -299,10 +300,16 @@ class SourceStore:
         self.root = Path(self.root).expanduser()
 
     def lists(self) -> list[dict[str, Any]]:
-        """Return all discoverable sessions ordered by newest task or parent-transcript change."""
+        """List sessions by latest source change, reading identities only for recent sessions."""
         with self._lock:
             sessions = sorted(self._sessions().values(), key=lambda session: (-session.modified, session.id))
-            return [self._listing(session, []) for session in sessions]
+            cutoff = (datetime.now(UTC) - RECENT_SESSION_WINDOW).timestamp()
+            listings = []
+            for session in sessions:
+                recent = session.modified >= cutoff
+                listing = self._listing(session, [], read_identity=recent)
+                listings.append({**listing, "recent": recent})
+            return listings
 
     def state(self, list_id: str, now: datetime) -> dict[str, Any] | None:
         """Return normalized tasks and agents, or None for an undiscovered session identifier."""
@@ -352,10 +359,10 @@ class SourceStore:
         paths = [path for path in _children(task_dir) if path.suffix == ".json" and _regular_stat(path)] if task_dir else []
         return sorted(paths, key=lambda path: path.name)
 
-    def _listing(self, session: _Session, warnings: list[str]) -> dict[str, Any]:
-        identity = self._identity(session.transcript) if session.transcript else None
+    def _listing(self, session: _Session, warnings: list[str], *, read_identity: bool = True) -> dict[str, Any]:
+        identity = self._identity(session.transcript) if read_identity and session.transcript else None
         title = identity.title if identity else ""
-        if session.transcript:
+        if read_identity and session.transcript:
             custom_title_path = session.transcript.with_suffix("") / "custom-title.json"
             if _stat(custom_title_path):
                 custom_title = _read_json(custom_title_path, warnings).get("customTitle")

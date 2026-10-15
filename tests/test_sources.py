@@ -2,8 +2,9 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from live_gantt.sources import SourceStore
 
@@ -190,6 +191,63 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(by_id[self.list_id]["project"], "/example/project")
         self.assertEqual(self.store.state("other-session", self.now)["tasks"], [])
         self.assertIsNone(self.store.state("../outside", self.now))
+
+    def test_listing_old_session_does_not_open_its_transcript_or_custom_title(self):
+        self.append({"type": "user", "cwd": "/old/project", "message": {"content": "Old prompt"}})
+        title_dir = self.transcript.with_suffix("")
+        title_dir.mkdir()
+        custom_title = title_dir / "custom-title.json"
+        custom_title.write_text(json.dumps({"customTitle": "Old custom title"}))
+        modified = (self.now - timedelta(days=15)).timestamp()
+        os.utime(self.transcript, (modified, modified))
+        opened = []
+        original_open = Path.open
+
+        def record_open(path, *args, **kwargs):
+            opened.append(path)
+            return original_open(path, *args, **kwargs)
+
+        with patch("live_gantt.sources.datetime", wraps=datetime) as clock, patch.object(Path, "open", record_open):
+            clock.now.return_value = self.now
+            listing = self.store.lists()[0]
+        self.assertNotIn(self.transcript, opened)
+        self.assertNotIn(custom_title, opened)
+        self.assertEqual(listing, {"id": self.list_id, "title": self.list_id, "project": "",
+                                   "updatedAt": "2026-09-30T12:00:00Z", "recent": False})
+
+    def test_selecting_old_session_reads_its_identity_lazily(self):
+        self.append({"type": "user", "cwd": "/old/project", "message": {"content": "Old prompt"}})
+        modified = (self.now - timedelta(days=15)).timestamp()
+        os.utime(self.transcript, (modified, modified))
+        with patch("live_gantt.sources.datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now
+            self.assertEqual(self.store.lists()[0]["title"], self.list_id)
+            selected = self.state()
+            self.assertEqual(selected["title"], "Old prompt")
+            self.assertEqual(selected["project"], "/old/project")
+            self.assertEqual(self.store.lists()[0]["title"], self.list_id)
+
+    def test_recent_session_window_includes_exact_boundary_and_task_changes(self):
+        cutoff = self.now - timedelta(days=14)
+        self.append({"type": "user", "cwd": "/recent/project", "message": {"content": "At the cutoff"}})
+        os.utime(self.transcript, (cutoff.timestamp(), cutoff.timestamp()))
+        other = self.project_dir / "older-session.jsonl"
+        self.append({"type": "user", "message": {"content": "Older prompt"}}, path=other)
+        older = cutoff.timestamp() - 1
+        os.utime(other, (older, older))
+        with patch("live_gantt.sources.datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now
+            by_id = {listing["id"]: listing for listing in self.store.lists()}
+            self.assertTrue(by_id[self.list_id]["recent"])
+            self.assertEqual(by_id[self.list_id]["title"], "At the cutoff")
+            self.assertFalse(by_id["older-session"]["recent"])
+            os.utime(self.transcript, (older, older))
+            self.task()
+            task_path = self.task_dir / "1.json"
+            os.utime(task_path, (cutoff.timestamp(), cutoff.timestamp()))
+            listing = next(item for item in self.store.lists() if item["id"] == self.list_id)
+            self.assertTrue(listing["recent"])
+            self.assertEqual(listing["title"], "At the cutoff")
 
     def test_malformed_values_warn_and_state_remains_json_serializable(self):
         self.task(status=["completed"], metadata={
