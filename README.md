@@ -110,4 +110,8 @@ For a plugin installation, also run in Claude Code:
 
 Removing the plugin alone does not unregister the service. Foreground-only use needs no uninstall step beyond stopping the process.
 
+## Licence
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT licence](LICENSE-MIT) at your option.
+
 Made by al-Kindi (https://alkindi.pt)

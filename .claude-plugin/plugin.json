@@ -10,5 +10,6 @@
     "email": "ferit@alkindi.pt",
     "url": "https://alkindi.pt"
   },
-  "homepage": "https://alkindi.pt"
+  "homepage": "https://alkindi.pt",
+  "license": "MIT OR Apache-2.0"
 }
