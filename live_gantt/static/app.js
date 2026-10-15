@@ -4,6 +4,7 @@ const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const MINUTES_PER_HOUR = HOUR / MINUTE;
 const MINIMUM_FIT_SPAN = 12 * HOUR;
 const FIT_PADDING_SHARE = 0.06;
 const PAST_SHARE = 0.25;
@@ -32,7 +33,7 @@ function savedZoom() {
 }
 
 const elements = Object.fromEntries(
-  ["session", "project", "connection", "connection-text", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["session", "project", "connection", "connection-text", "freshness", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
@@ -54,6 +55,7 @@ const state = {
   detailPinned: false,
   detailKey: null,
   detailEntries: new Map(),
+  observations: new Map(),
 };
 
 function node(tag, className, text) {
@@ -79,6 +81,13 @@ function percent(value) {
 
 function hours(value) {
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(number(value))} h`;
+}
+
+function duration(milliseconds) {
+  const minutes = Math.floor(Math.max(0, milliseconds) / MINUTE);
+  return minutes < MINUTES_PER_HOUR
+    ? `${minutes} min`
+    : `${Math.floor(minutes / MINUTES_PER_HOUR)} h ${minutes % MINUTES_PER_HOUR} min`;
 }
 
 function dateTime(value, full = false) {
@@ -183,6 +192,7 @@ function selectSession(id) {
   elements.details.hidden = true;
   elements["timeline-content"].replaceChildren();
   elements.milestones.replaceChildren();
+  renderFreshness(null);
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
   elements.project.textContent = state.lists.find(list => list.id === id)?.project || "Claude Code sessions";
@@ -221,6 +231,7 @@ function selectSession(id) {
     elements.details.hidden = true;
     elements["timeline-content"].replaceChildren();
     elements.milestones.replaceChildren();
+    renderFreshness(null);
     elements["task-count"].textContent = "";
     elements.warnings.hidden = true;
     renderConnection();
@@ -396,6 +407,9 @@ function taskSubtitle(task, now = Date.now()) {
   const labels = [taskState(task, now)];
   if (task.queued) labels.push(waitingLabel(task));
   if (task.status === "in_progress") labels.push(percent(task.effectiveProgress ?? task.progress));
+  const updated = timestamp(task.updatedAt);
+  if (task.status === "in_progress" && updated !== null) labels.push(`updated ${duration(now - updated)} ago`);
+  for (const observed of state.observations.get(task.id) || []) labels.push(`declared running; observed: ${observed}`);
   if (task.estimateMean !== null && task.estimateMean !== undefined) labels.push(hours(task.estimateMean));
   if (task.warnings?.length) labels.push("Warning");
   if (task.markers?.length) labels.push(...task.markers);
@@ -614,6 +628,23 @@ function renderFollow() {
   elements.follow.textContent = state.follow ? "Following now" : "Follow now";
 }
 
+function renderFreshness(freshness) {
+  const findings = freshness?.stale ? freshness.findings || [] : [];
+  state.observations = new Map();
+  for (const finding of findings) {
+    if (!finding.observed) continue;
+    if (!state.observations.has(finding.taskId)) state.observations.set(finding.taskId, []);
+    state.observations.get(finding.taskId).push(finding.observed);
+  }
+  elements.freshness.replaceChildren();
+  elements.freshness.hidden = !findings.length;
+  if (!findings.length) return;
+  elements.freshness.append(node("h2", "", "This plan is stale"));
+  const list = node("ul");
+  for (const finding of findings) list.append(node("li", "", finding.message));
+  elements.freshness.append(list);
+}
+
 function renderModel() {
   const now = Date.now();
   const model = state.model;
@@ -622,6 +653,7 @@ function renderModel() {
   const tasks = model.tasks || [];
   const completed = tasks.filter(task => task.status === "completed").length;
   elements["task-count"].textContent = `${completed}/${tasks.length} tasks done`;
+  renderFreshness(model.freshness);
   renderMilestones(now);
   renderTimeline(now, state.follow || !state.range);
   setNotice(state.tracks.length ? "" : "No tasks or active agents in this time window.");

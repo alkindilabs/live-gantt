@@ -22,6 +22,8 @@
   --silent-fill: #e9eaed;
   --now: #b64a3b;
   --warning: #80521c;
+  --stale: #a3352a;
+  --stale-fill: #fbe6e2;
   --shadow: 0 12px 36px #18233426;
   --label-width: 246px;
   --plot-width: 800px;
@@ -51,6 +53,8 @@
     --silent-fill: #353b45;
     --now: #fa9c8b;
     --warning: #e4bd80;
+    --stale: #ffb3a6;
+    --stale-fill: #4f2621;
     --shadow: 0 12px 36px #00000059;
   }
 }
@@ -75,6 +79,9 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; font-weight: 650; letter-spac
 .connection { display: flex; align-items: center; gap: 7px; min-width: 130px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .connection-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--done); }
 .disconnected .connection-dot { background: var(--muted); border-radius: 0; }
+.freshness-alert { margin-bottom: 8px; padding: 8px 12px; border: 1px solid var(--stale); border-left-width: 4px; border-radius: 5px; background: var(--stale-fill); color: var(--stale); font-size: 12px; }
+.freshness-alert h2 { margin: 0 0 4px; font-size: 13px; font-weight: 650; }
+.freshness-alert ul { margin: 0; padding-left: 18px; }
 .milestones { display: grid; gap: 2px; line-height: 1.3; margin-bottom: 6px; }
 .milestone-cards { display: flex; gap: 8px; overflow-x: auto; }
 .milestone { flex: 1 0 255px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
