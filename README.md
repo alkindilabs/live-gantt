@@ -16,6 +16,20 @@ Open <http://127.0.0.1:4791>. To use another port, pass `--port 4792`. The serve
 
 The default source is Claude Code's configuration directory. Set `CLAUDE_CONFIG_DIR` to read another configuration root. Sources remain read-only. The `-B` flag prevents Python from writing bytecode caches. Closing every chart tab stops source polling; reopening reconstructs the history from transcripts.
 
+For login startup on macOS, run:
+
+```sh
+./launchd/install.sh
+```
+
+The installer renders [the plist template](launchd/local.live-gantt.plist), registers `local.live-gantt` in your user launchd domain, and points it at this checkout and Homebrew Python. It sets background process priority, niceness 10 and low-priority input/output. Output goes to `live-gantt.log` in your user Library's Logs directory. An explicitly set `CLAUDE_CONFIG_DIR` is captured during installation. Reinstall after moving the checkout or changing that setting.
+
+```sh
+./launchd/uninstall.sh
+```
+
+Uninstall stops the agent and removes its generated property list; it retains the log. Neither script needs administrator privileges. The application itself writes only to its standard output and standard error, which launchd directs to that log.
+
 ## Read the chart
 
 Sessions are ordered by the last parent transcript or task-file change. A custom session title takes precedence over the first user prompt. Tasks are grouped by lane, in task identifier order. Current running work reserves its lane before pending work. Done bars use recorded start and completion times; a task without those times has a `no history` marker rather than invented dates.
