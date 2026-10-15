@@ -14,8 +14,9 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+from .freshness import assess
 from .schedule import project
-from .sources import LIST_ID, SourceStore
+from .sources import LIST_ID, SourceStore, parse_time
 
 
 DEFAULT_PORT = 4791
@@ -49,6 +50,11 @@ def encode_json(value):
                       separators=(",", ":")).encode("utf-8")
 
 
+def _verdict(freshness):
+    """The part of a freshness summary that changes only when a finding does, not every second."""
+    return {key: value for key, value in freshness.items() if key != "sinceChangeSeconds"}
+
+
 def fingerprint(value):
     """Return a stable content hash independent of dictionary insertion order."""
     payload = json.dumps(value, sort_keys=True, ensure_ascii=False,
@@ -78,11 +84,12 @@ class Monitor:
             if raw is None:
                 self.models.pop(list_id, None)
                 continue
-            digest = fingerprint(raw)
+            freshness = assess(raw["tasks"], parse_time(raw["transcriptUpdatedAt"]), now)
+            digest = fingerprint({"source": raw, "freshness": _verdict(freshness)})
             previous = self.models.get(list_id)
             if fresh_projection or previous is None or previous[0] != digest:
                 projection = project(raw["tasks"], now)
-                model = {**raw, **projection, "observedAt": now.isoformat(),
+                model = {**raw, **projection, "freshness": freshness, "observedAt": now.isoformat(),
                          "warnings": raw["warnings"] + projection["warnings"]}
                 self.models[list_id] = (digest, model)
 
