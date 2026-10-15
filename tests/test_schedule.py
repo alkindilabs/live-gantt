@@ -50,7 +50,10 @@ class ProjectionTests(unittest.TestCase):
         ])
         self.assertEqual(actual["2"]["projectedStart"], timestamp(2))
         self.assertEqual(actual["3"]["projectedStart"], timestamp(3))
-        self.assertTrue(actual["2"]["blocked"])
+        self.assertFalse(actual["2"]["blocked"])
+        self.assertEqual(actual["2"].get("queued"), True)
+        self.assertEqual(actual["2"].get("waitingFor"), ["1"])
+        self.assertEqual(actual["3"].get("waitingFor"), ["2"])
 
     def test_unestimated_task_leaves_followers_unscheduled(self):
         actual = projected_tasks([
@@ -61,6 +64,10 @@ class ProjectionTests(unittest.TestCase):
         self.assertIsNone(actual["2"]["projectedStart"])
         self.assertIn("after an unestimated task", actual["2"]["markers"])
         self.assertIsNone(actual["3"]["projectedStart"])
+        for item in actual.values():
+            self.assertFalse(item["blocked"])
+            self.assertEqual(item.get("queued"), False)
+            self.assertEqual(item.get("waitingFor"), [])
         self.assertIsNone(project([task(1, None), task(2)], NOW)["milestones"][0]["p50"])
 
     def test_full_live_progress_has_no_remaining_duration(self):
@@ -105,14 +112,24 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(actual["2"]["projectedStart"], timestamp())
 
     def test_cycles_are_reported_without_guessing_projection(self):
-        model = project([task(1, lane="A", blockedBy=["2"]), task(2, lane="B", blockedBy=["1"])], NOW)
+        model = project([
+            task(1, lane="A", blockedBy=["2"]),
+            task(2, lane="B", blockedBy=["1"]),
+            task(3, lane="A"),
+        ], NOW)
         self.assertTrue(model["warnings"])
         self.assertTrue(all(item["projectedEnd"] is None for item in model["tasks"]))
         self.assertTrue(all(item["warnings"] for item in model["tasks"]))
+        self.assertTrue(all(item["blocked"] for item in model["tasks"]))
+        self.assertTrue(all(item.get("queued") is False for item in model["tasks"]))
+        self.assertTrue(all(item.get("waitingFor") == [] for item in model["tasks"]))
 
     def test_missing_blocker_is_reported_without_guessing_projection(self):
-        model = project([task(1, blockedBy=["gone"])], NOW)
-        self.assertIsNone(model["tasks"][0]["projectedEnd"])
+        model = project([task(1, blockedBy=["gone"]), task(2)], NOW)
+        self.assertTrue(all(item["projectedEnd"] is None for item in model["tasks"]))
+        self.assertTrue(all(item["blocked"] for item in model["tasks"]))
+        self.assertTrue(all(item.get("queued") is False for item in model["tasks"]))
+        self.assertTrue(all(item.get("waitingFor") == [] for item in model["tasks"]))
         self.assertTrue(model["warnings"])
 
     def test_completed_milestone_retains_actual_finish(self):
@@ -120,6 +137,19 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(model["milestones"][0]["p50"], timestamp(-1))
         self.assertEqual(model["milestones"][0]["p90"], timestamp(-1))
         self.assertFalse(model["milestones"][0]["hasRemaining"])
+
+    def test_milestone_estimate_flag_covers_only_remaining_work(self):
+        model = project([
+            task(1, status="completed", milestone="Unknown", lane="Unknown"),
+            task(2, None, milestone="Unknown", lane="Unknown"),
+            task(3, None, milestone="Mixed", lane="Mixed"),
+            task(4, milestone="Mixed", lane="Mixed"),
+            task(5, status="completed", milestone="Done", lane="Done"),
+        ], NOW)
+        milestones = {item["name"]: item for item in model["milestones"]}
+        self.assertEqual(milestones["Unknown"].get("hasEstimate"), False)
+        self.assertEqual(milestones["Mixed"].get("hasEstimate"), True)
+        self.assertEqual(milestones["Done"].get("hasEstimate"), False)
 
     def test_completed_task_does_not_cut_the_pending_lane_chain(self):
         actual = projected_tasks([
@@ -135,6 +165,20 @@ class ProjectionTests(unittest.TestCase):
         ])
         self.assertEqual(actual["1"]["projectedStart"], timestamp(2))
         self.assertEqual(actual["3"]["projectedStart"], timestamp(3))
+        self.assertFalse(actual["1"]["blocked"])
+        self.assertEqual(actual["1"].get("queued"), True)
+        self.assertEqual(actual["1"].get("waitingFor"), ["2"])
+
+    def test_queue_excludes_prerequisites_available_now(self):
+        actual = projected_tasks([
+            task(1, lane="Done", status="completed", ended=timestamp(-1)),
+            task(2, 0, lane="Zero", status="in_progress", started=timestamp(-1)),
+            task(3, lane="Build", blockedBy=["1", "2"]),
+        ])["3"]
+        self.assertEqual(actual["projectedStart"], timestamp())
+        self.assertFalse(actual["blocked"])
+        self.assertEqual(actual.get("queued"), False)
+        self.assertEqual(actual.get("waitingFor"), [])
 
     def test_multiple_running_tasks_are_retained_and_warned(self):
         model = project([

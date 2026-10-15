@@ -44,6 +44,7 @@ def _enrich(task: dict, now: datetime) -> dict:
     enriched.update(
         warnings=list(task["warnings"]), markers=[], projectedStart=None,
         projectedEnd=None, overrun=False, overrunAt=None, blocked=False,
+        queued=False, waitingFor=[],
         effectiveProgress=max(task["progress"], task["liveProgress"]),
         estimateMean=None, estimateSd=None,
     )
@@ -129,6 +130,7 @@ def _milestones(tasks: list[dict], forecasts: dict[str, _Forecast], variances: d
         milestones.append({
             "name": name, "progress": completed_weight / total_weight * _PERCENT,
             "hasRemaining": bool(remaining),
+            "hasEstimate": any(task["estimate"] is not None for task in remaining),
             "p50": p50.isoformat() if p50 else None,
             "p90": p90.isoformat() if p90 else None,
         })
@@ -145,6 +147,11 @@ def project(tasks: list[dict], now: datetime) -> dict:
     Multiple running tasks remain visible and produce a warning. Completed
     work never interrupts the chain of remaining tasks in a lane and is
     available immediately when its completion timestamp is unknown.
+
+    Queued tasks identify unfinished prerequisites whose forecasts end after
+    ``now``. Missing prerequisites and cycles mark affected tasks blocked;
+    unknown estimates retain their separate markers. Milestone estimates
+    describe remaining work, excluding completed tasks.
 
     Forecast uncertainty follows the prerequisite with the latest mean end,
     breaking ties by variance, and adds each task's remaining variance once.
@@ -181,10 +188,6 @@ def project(tasks: list[dict], now: datetime) -> dict:
             missing[task_id] = requirements - by_id.keys()
             for absent in sorted(missing[task_id], key=_id_key):
                 _warn(task, f"Missing prerequisite task {absent}", warnings)
-            task["blocked"] = any(
-                blocker not in by_id or by_id[blocker]["status"] != "completed"
-                for blocker in task["blockedBy"]
-            )
         dependencies[task_id] = requirements & by_id.keys()
         for requirement in dependencies[task_id]:
             followers[requirement].append(task_id)
@@ -200,6 +203,9 @@ def project(tasks: list[dict], now: datetime) -> dict:
         predecessors = [forecasts[requirement] for requirement in dependencies[task_id]]
         inherited_unknown = any(forecast.end is None for forecast in predecessors)
         inherited_unestimated = any(forecast.unestimated for forecast in predecessors)
+        task["blocked"] = bool(missing.get(task_id)) or any(
+            by_id[requirement]["blocked"] for requirement in dependencies[task_id]
+        )
         mean, deviation = task["estimateMean"], task["estimateSd"]
         if status == "completed":
             forecast = _Forecast(_time(task["ended"]) or now)
@@ -231,6 +237,13 @@ def project(tasks: list[dict], now: datetime) -> dict:
                 forecast = _Forecast(end, controlling.path | {task_id})
                 task["projectedStart"] = controlling.end.isoformat()
                 task["projectedEnd"] = end.isoformat()
+                if status == "pending":
+                    task["waitingFor"] = sorted((
+                        requirement for requirement in dependencies[task_id]
+                        if by_id[requirement]["status"] != "completed"
+                        and forecasts[requirement].end > now
+                    ), key=_id_key)
+                    task["queued"] = bool(task["waitingFor"])
         forecasts[task_id] = forecast
         for follower in followers[task_id]:
             degrees[follower] -= 1
@@ -240,6 +253,7 @@ def project(tasks: list[dict], now: datetime) -> dict:
     for task_id in degrees.keys() - forecasts.keys():
         task = by_id[task_id]
         forecasts[task_id] = _Forecast(None)
+        task["blocked"] = True
         task["markers"].append("dependency cycle")
         _warn(task, "A dependency cycle prevents projection", warnings)
     return {
