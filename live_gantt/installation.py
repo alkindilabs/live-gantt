@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 MINIMUM_PYTHON = (3, 11)
 APPLICATION_DIRECTORY = "live-gantt"
@@ -20,6 +21,8 @@ SOURCE_ROOT_VARIABLE = "CLAUDE_CONFIG_DIR"
 OWNER_READ_WRITE = 0o600
 LAUNCHD_TEMPLATE = Path("launchd/local.live-gantt.plist")
 SYSTEMD_TEMPLATE = Path("systemd/live-gantt.service")
+BOOTOUT_POLL_SECONDS = 0.1
+BOOTOUT_WAIT_SECONDS = 10
 
 
 def _xdg_directory(environ, variable, fallback):
@@ -90,9 +93,28 @@ def _read_settings(directory):
 
 
 def _stop_service(system, identifier):
-    command = (["launchctl", "bootout", f"gui/{os.getuid()}/{identifier}"]
-               if system == "Darwin" else ["systemctl", "--user", "stop", identifier])
-    subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if system != "Darwin":
+        subprocess.run(["systemctl", "--user", "stop", identifier], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    service = f"gui/{os.getuid()}/{identifier}"
+    subprocess.run(["launchctl", "bootout", service], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _wait_until_launchd_forgets(service)
+
+
+def _wait_until_launchd_forgets(service):
+    """Wait, at most BOOTOUT_WAIT_SECONDS, until launchd no longer lists `service`.
+
+    `launchctl bootout` returns before launchd has removed the service, and bootstrapping the
+    same label meanwhile fails with error 5 (Input/output error)."""
+    deadline = time.monotonic() + BOOTOUT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        listed = subprocess.run(["launchctl", "print", service], check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if listed.returncode != 0:
+            return
+        time.sleep(BOOTOUT_POLL_SECONDS)
 
 
 def _service_target(system, plugin_root, home, environ):
