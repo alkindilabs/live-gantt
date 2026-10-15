@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Live Gantt</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div class="identity">
+          <h1>Live Gantt</h1>
+          <p id="project" class="project">Claude Code sessions</p>
+        </div>
+        <div class="session-control">
+          <label for="session">Session</label>
+          <select id="session" aria-label="Choose a session"><option>Loading sessions…</option></select>
+        </div>
+        <div id="connection" class="connection disconnected" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-text">Connecting</span>
+        </div>
+      </header>
+
+      <section id="milestones" class="milestones" aria-label="Milestone progress"></section>
+      <section class="chart-shell" aria-label="Session work timeline">
+        <div class="toolbar">
+          <div class="zoom-controls" role="group" aria-label="Timeline zoom">
+            <button type="button" data-zoom="12h" aria-pressed="false">12 h</button>
+            <button type="button" data-zoom="3d" aria-pressed="false">3 days</button>
+            <button type="button" data-zoom="week" aria-pressed="false">Week</button>
+            <button type="button" data-zoom="fit" aria-pressed="true">Fit</button>
+          </div>
+          <button id="follow" class="follow" type="button" aria-pressed="true">Following now</button>
+          <span id="task-count" class="task-count"></span>
+        </div>
+        <div class="legend" aria-label="Status legend">
+          <span><i class="legend-swatch done" aria-hidden="true"></i>Done</span>
+          <span><i class="legend-swatch running" aria-hidden="true"></i>Running</span>
+          <span><i class="legend-swatch projected" aria-hidden="true"></i>Projected</span>
+          <span><i class="legend-swatch overrun" aria-hidden="true"></i>Overrun</span>
+          <span><i class="legend-swatch blocked" aria-hidden="true"></i>Blocked</span>
+          <span><i class="legend-swatch silent" aria-hidden="true"></i>Silent</span>
+        </div>
+        <p id="notice" class="notice" role="status">Reading local sessions…</p>
+        <div id="timeline" class="timeline" tabindex="0" aria-label="Timeline; scroll horizontally to explore time">
+          <div id="timeline-content" class="timeline-content"></div>
+        </div>
+        <p class="chart-help">Hover or focus a task for details. Times use your local timezone.</p>
+      </section>
+      <section id="warnings" class="source-warnings" aria-label="Source warnings" hidden></section>
+      <aside id="details" class="details" aria-label="Work details" hidden>
+        <button id="close-details" class="close-details" type="button" aria-label="Close details">Close</button>
+        <div id="details-content"></div>
+      </aside>
+    </main>
+  </body>
+</html>
