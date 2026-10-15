@@ -9,6 +9,15 @@
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/task_created.py\""
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/freshness.py\""
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -17,6 +26,26 @@
           {
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/freshness.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/freshness.py\""
           }
         ]
       }
