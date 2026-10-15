@@ -11,6 +11,7 @@ from typing import Any
 
 STALE_PROGRESS_MINUTES = 15
 ACTIVE_SESSION_MINUTES = 5
+SILENT_RUN_MINUTES = 10
 SCHEDULING_FIELDS = ("estimate", "lane")
 FINISHED_STATUSES = frozenset({"completed", "deleted"})
 SECONDS_PER_MINUTE = 60
@@ -18,6 +19,8 @@ SECONDS_PER_MINUTE = 60
 MISSING_SCHEDULE = "missing-schedule"
 STALE_PROGRESS = "stale-progress"
 MISSING_PROGRESS = "missing-progress"
+SILENT_RUN = "silent-run"
+PROCESS_GONE = "process-gone"
 
 
 def _time(value: str | None) -> datetime | None:
@@ -42,8 +45,36 @@ def _finding(rule: str, task: dict, message: str) -> dict:
     return {"rule": rule, "taskId": task["id"], "message": message}
 
 
+def _run_finding(rule: str, task: dict, message: str, observed: str) -> dict:
+    return {**_finding(rule, task, message), "observed": observed}
+
+
+def _run_findings(task: dict, run: dict, session_active: bool, now: datetime) -> list[dict]:
+    if run["ended"]:
+        return []
+    name = f"Run '{run['label']}'"
+    log_updated = _time(run["logUpdatedAt"])
+    silence = now - log_updated if log_updated else None
+    log_missing = run["log"] is not None and log_updated is None
+    log_silent = silence is not None and silence >= timedelta(minutes=SILENT_RUN_MINUTES)
+    log_shows_no_life = run["log"] is None or log_missing or log_silent
+    if run["pidAlive"] is False and log_shows_no_life:
+        return [_run_finding(PROCESS_GONE, task,
+                             f"{name} (pid {run['pid']}) of task #{task['id']} is no longer running but has not ended.",
+                             "process gone")]
+    if log_missing:
+        return [_run_finding(SILENT_RUN, task, f"{name} of task #{task['id']}: log not found at {run['log']}.",
+                             "log not found")]
+    if log_silent and session_active:
+        minutes = _whole_minutes(silence)
+        return [_run_finding(SILENT_RUN, task,
+                             f"{name} of task #{task['id']} has written nothing to its log for {minutes} minutes.",
+                             f"silent {minutes} min")]
+    return []
+
+
 def _task_findings(task: dict, session_active: bool, now: datetime) -> list[dict]:
-    findings = []
+    findings = [finding for run in task["runs"] for finding in _run_findings(task, run, session_active, now)]
     missing = _missing_schedule(task)
     if missing:
         findings.append(_finding(MISSING_SCHEDULE, task,
@@ -67,10 +98,13 @@ def assess(tasks: list[dict], transcript_updated: datetime | None, now: datetime
 
     ``transcript_updated`` is the parent transcript's last change; the session is active
     when it changed within ``ACTIVE_SESSION_MINUTES``, inclusive. Unreadable task files,
-    completed and deleted tasks produce no findings. ``sinceChangeSeconds`` measures
+    completed and deleted tasks produce no findings. A run that has not ended is stale when
+    its log is missing, when its log has not changed for ``SILENT_RUN_MINUTES`` while the
+    session is active, or when its declared process has exited and its log, if any, shows
+    no life; a log still being written outweighs an exited or reused process identifier. ``sinceChangeSeconds`` measures
     from the newest task file change and is ``None`` without task files. The result is
     JSON-ready: ``{stale, findings: [{rule, taskId, message}], sinceChangeSeconds,
-    sessionActive}``.
+    sessionActive}``; run findings add ``observed``, a short phrase for what was seen.
     """
     session_active = (transcript_updated is not None
                       and now - transcript_updated <= timedelta(minutes=ACTIVE_SESSION_MINUTES))

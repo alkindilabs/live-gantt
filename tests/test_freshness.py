@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from live_gantt.freshness import ACTIVE_SESSION_MINUTES, STALE_PROGRESS_MINUTES, assess
+from live_gantt.freshness import ACTIVE_SESSION_MINUTES, SILENT_RUN_MINUTES, STALE_PROGRESS_MINUTES, assess
 
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
@@ -89,6 +89,63 @@ class ProgressRuleTests(unittest.TestCase):
                                  [("missing-progress", "1")])
         self.assertEqual(rules([running(progress=0)]), [])
         self.assertEqual(rules([task(status="pending")]), [])
+
+
+def run(*, log="job.log", log_updated=NOW, ended=None, pid=None, pid_alive=None):
+    return {"label": "job f", "started": iso(ago(60)), "ended": ended and iso(ended),
+            "log": log, "logUpdatedAt": log_updated and iso(log_updated),
+            "pid": pid, "pidAlive": pid_alive, "status": "completed" if ended else "running"}
+
+
+def run_findings(*, transcript_updated=NOW, **fields):
+    task_with_run = running()
+    task_with_run["runs"] = [run(**fields)]
+    return assess([task_with_run], transcript_updated, NOW)["findings"]
+
+
+class SilentRunRuleTests(unittest.TestCase):
+    def test_log_silent_for_exactly_the_limit_while_session_active_is_stale(self):
+        limit = timedelta(minutes=SILENT_RUN_MINUTES)
+        finding, = run_findings(log_updated=NOW - limit)
+        self.assertEqual((finding["rule"], finding["taskId"]), ("silent-run", "1"))
+        self.assertEqual(finding["message"], "Run 'job f' of task #1 has written nothing to its log for 10 minutes.")
+        self.assertEqual(finding["observed"], "silent 10 min")
+        self.assertEqual(run_findings(log_updated=NOW - limit + ONE_SECOND), [])
+
+    def test_inactive_session_does_not_report_a_quiet_log(self):
+        self.assertEqual(run_findings(log_updated=ago(30), transcript_updated=None), [])
+
+    def test_ended_runs_and_runs_without_a_log_are_ignored(self):
+        self.assertEqual(run_findings(log_updated=ago(30), ended=ago(20)), [])
+        self.assertEqual(run_findings(log=None, log_updated=None), [])
+
+    def test_missing_log_file_is_a_finding_even_when_idle(self):
+        finding, = run_findings(log_updated=None, transcript_updated=None)
+        self.assertEqual(finding["rule"], "silent-run")
+        self.assertEqual(finding["message"], "Run 'job f' of task #1: log not found at job.log.")
+        self.assertEqual(finding["observed"], "log not found")
+
+
+class ProcessGoneRuleTests(unittest.TestCase):
+    def test_exited_process_without_a_log_is_a_finding_even_when_idle(self):
+        finding, = run_findings(log=None, log_updated=None, pid=4242, pid_alive=False, transcript_updated=None)
+        self.assertEqual((finding["rule"], finding["taskId"]), ("process-gone", "1"))
+        self.assertEqual(finding["message"], "Run 'job f' (pid 4242) of task #1 is no longer running but has not ended.")
+        self.assertEqual(finding["observed"], "process gone")
+
+    def test_living_process_or_ended_run_is_not_a_finding(self):
+        self.assertEqual(run_findings(log=None, log_updated=None, pid=4242, pid_alive=True), [])
+        self.assertEqual(run_findings(log=None, log_updated=None, pid=4242, ended=ago(1)), [])
+
+    def test_a_log_still_being_written_outweighs_an_absent_pid(self):
+        self.assertEqual(run_findings(log_updated=ago(1), pid=4242, pid_alive=False), [])
+
+    def test_exited_process_with_silent_or_missing_log_reports_only_the_exit(self):
+        silent = timedelta(minutes=SILENT_RUN_MINUTES)
+        for log_updated in (NOW - silent, None):
+            with self.subTest(log_updated=log_updated):
+                self.assertEqual([finding["rule"] for finding in run_findings(
+                    log_updated=log_updated, pid=4242, pid_alive=False)], ["process-gone"])
 
 
 class SummaryTests(unittest.TestCase):
