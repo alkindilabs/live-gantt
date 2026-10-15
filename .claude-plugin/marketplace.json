@@ -6,6 +6,7 @@
     "email": "ferit@alkindi.pt",
     "url": "https://alkindi.pt"
   },
+  "description": "Live Gantt: a local, live Gantt chart of Claude Code tasks, agents and milestone forecasts.",
   "plugins": [
     {
       "name": "live-gantt",
