@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "live-gantt",
+  "owner": {
+    "name": "al-Kindi",
+    "email": "ferit@alkindi.pt",
+    "url": "https://alkindi.pt"
+  },
+  "plugins": [
+    {
+      "name": "live-gantt",
+      "source": "./"
+    }
+  ]
+}

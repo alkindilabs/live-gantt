@@ -1,0 +1,18 @@
+[Unit]
+Description=Live Gantt for Claude Code tasks
+
+[Service]
+Type=simple
+WorkingDirectory=@DIRECTORY@
+ExecStart=:@PYTHON@ -B -m live_gantt
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+@ENVIRONMENT@
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

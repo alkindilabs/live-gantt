@@ -12,7 +12,7 @@ HIGHEST_PORT = 65535
 
 
 def main():
-    """Serve Claude Code sessions until interrupted or launchd stops the process."""
+    """Serve Claude Code sessions until interrupted or the service is stopped."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()

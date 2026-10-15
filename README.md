@@ -1,34 +1,59 @@
 # Live Gantt
 
-A local, live Gantt chart for Claude Code task lists and their agents. Pick a session from any project and see actual work, estimated work, external runs and milestone forecasts. The task list is the plan; there is no separate plan file.
+When will your agents be done? Live Gantt answers from the task list your Claude Code session already keeps: each milestone's likely finish (P50) and a cautious one (P90), from estimates, lanes and dependencies, redrawn live as tasks start, progress and finish. Background agents and outside runs (Codex, long jobs) appear under the tasks they serve, with their latest step. It runs on your machine, reads only local files and sends nothing anywhere. The task list is the plan; there is no separate plan file.
 
-Requires Python 3.11 or later. Uses only its standard library and a static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No installation, dependencies, build step, network services or internet access are needed.
+Requires Python 3.11 or later. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service.
 
-## Run
+## Install as a Claude Code plugin
 
-From this checkout:
+This repository is both the plugin and its one-plugin marketplace. Nothing is published yet. With a local checkout, run these commands in Claude Code, replacing the example directory with the checkout's absolute path:
+
+```text
+/plugin marketplace add /absolute/path/to/live-gantt
+/plugin install live-gantt@live-gantt
+/live-gantt:open
+```
+
+The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing.
+
+Installation copies the application out of the replaceable plugin cache into stable per-user storage:
+
+| Platform | Application directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/live-gantt` |
+| Linux | `$XDG_DATA_HOME/live-gantt`, or `~/.local/share/live-gantt` when unset |
+
+It records the installed version and registers a login service using your Python interpreter. The service runs at niceness 10 with low-priority input/output and does no polling while the chart is closed. A SessionStart hook refreshes and restarts an already installed service when the plugin version is newer. It does nothing when no installation exists, or the installed version is current or newer. Installing the plugin alone does not install the service.
+
+## Install without a plugin
+
+From a checkout, register the same per-user service:
+
+```sh
+./scripts/install.sh
+```
+
+Open <http://127.0.0.1:4791>. No administrator privileges are required. An explicitly set `CLAUDE_CONFIG_DIR` is captured during installation and retained across updates; reinstall with a new value to change the source root. Reinstall from the updated checkout to update a standalone installation.
+
+To run without a login service:
 
 ```sh
 python3 -B -m live_gantt
 ```
 
-Open <http://127.0.0.1:4791>. To use another port, pass `--port 4792`. The server always binds IPv4 loopback, and accepts only the `127.0.0.1` and `localhost` Host headers with that port. It sends no cross-origin resource sharing headers.
+To use another port for this foreground process, pass `--port 4792`. Stop it with Control-C. The `-B` flag prevents bytecode caches.
 
-The default source is Claude Code's configuration directory. Set `CLAUDE_CONFIG_DIR` to read another configuration root. Sources remain read-only. The `-B` flag prevents Python from writing bytecode caches. Closing every chart tab stops source polling; reopening reconstructs the history from transcripts.
+## Privacy
 
-For login startup on macOS, run:
+The chart runs locally, reads local files without modifying them, and sends nothing anywhere. The server binds only IPv4 loopback and accepts only `127.0.0.1` and `localhost` Host headers with its port. It sends no cross-origin resource sharing headers; source text is rendered as text, not executable markup. There are no analytics, remote assets or outbound requests.
 
-```sh
-./launchd/install.sh
-```
+The default source is Claude Code's configuration directory; `CLAUDE_CONFIG_DIR` selects another root. The service writes its own installed files and logs, never tasks or transcripts. Closing every chart tab stops source polling; reopening reconstructs history from transcripts.
 
-The installer renders [the plist template](launchd/local.live-gantt.plist), registers `local.live-gantt` in your user launchd domain, and points it at this checkout and Homebrew Python. It runs as a standard process at niceness 10 with low-priority input/output; it does no work until a chart is open. Output goes to `live-gantt.log` in your user Library's Logs directory. An explicitly set `CLAUDE_CONFIG_DIR` is captured during installation. Reinstall after moving the checkout or changing that setting.
+## Compatibility
 
-```sh
-./launchd/uninstall.sh
-```
+Tested with Claude Code **2.1.292**. Task lists, session transcripts and subagent metadata are local implementation details, not a public, versioned application programming interface (API). A Claude Code update can change them without notice. Task discovery and task history or agent association are likely to break first: expect missing sessions, missing actual start/end times or detached agents. Metadata warnings can identify individual invalid fields.
 
-Uninstall stops the agent and removes its generated property list; it retains the log. Neither script needs administrator privileges. The application itself writes only to its standard output and standard error, which launchd directs to that log.
+Report a compatibility problem as an issue with your Claude Code version, what is missing, and any warning text. Do not attach private transcripts. The invented-data [compatibility fixture](tests/fixtures/claude-code-2.1.292) and [end-to-end test](tests/test_compatibility.py) pin the observed file shapes and must be refreshed against each supported Claude Code release.
 
 ## Read the chart
 
@@ -38,47 +63,9 @@ Running bars end at now and have a patterned projection for the remaining estima
 
 The default view is **12 h**, with now one quarter of the way across the visible chart. Use **12 h**, **3 days**, **Week** or **Fit**; the browser remembers your choice when local storage is available. The view follows now until you scroll horizontally; **Follow now** resumes it. Milestones with estimated remaining work use compact cards showing completion share and forecasts. Finished milestones share a **Done** line; milestones with no estimated remaining tasks share an **Unestimated** line. Hover or focus a task label to inspect its description, metadata, estimate and history; click to keep details open. Escape closes details. Connection age updates continuously; the browser reconnects after a disconnection. There is no animation when reduced motion is enabled.
 
-## Task metadata contract
+## Task planning
 
-Agents write these fields through Claude Code's task metadata. Live Gantt never modifies tasks or transcripts. Unknown metadata keys do not affect scheduling. Malformed known values produce a warning on that task and fall back independently, so one bad field does not hide the session.
-
-| Field | Contract |
-| --- | --- |
-| `weight` | Positive finite relative effort; default `1`. |
-| `milestone` | Group name; an omitted name is displayed as Main. |
-| `progress` | Finite number from `0` to `100`; default `0`. Used for milestone completion while in progress. |
-| `live` | Object with `journal`, positive integer `planned`, and numeric `from` and `to` satisfying `0 <= from <= to <= 100`. The journal is read incrementally. Lines containing a `type` of `result` count as finished agents. Live share is `from + (to - from) * min(finished / planned, 1)`. |
-| `estimate` | Object with finite elapsed hours `low`, `likely`, `high`, satisfying `0 <= low <= likely <= high`. No default estimate is invented. |
-| `lane` | Row group; defaults to the milestone, otherwise Main. |
-| `agents` | List of subagent identifiers, without the `agent-` filename prefix or file suffix. Matching agents become thin bars under the task. Unassigned agents remain in the Agents lane. |
-| `runs` | List of objects with a text `label`, ISO 8601 `started`, `ended` timestamp or `null`, and `log` path or `null`. The end cannot precede the start. A null end means live; the log modification time provides the last activity. |
-
-Journal and log paths may be absolute, begin with `~`, or be relative to the task list directory. No shell or environment-variable expansion is performed. Missing journals or logs produce warnings. ISO 8601 timestamps without an offset are treated as Coordinated Universal Time (UTC).
-
-Example metadata for a task whose implementation has begun:
-
-```json
-{
-  "weight": 3,
-  "milestone": "First release",
-  "progress": 25,
-  "estimate": {"low": 1, "likely": 2, "high": 4},
-  "lane": "Implementation",
-  "agents": ["a81d04"],
-  "runs": [
-    {
-      "label": "Integration checks",
-      "started": "2026-10-15T10:00:00Z",
-      "ended": null,
-      "log": null
-    }
-  ]
-}
-```
-
-The Program Evaluation and Review Technique (PERT) estimate is `E = (low + 4 * likely + high) / 6`, with standard deviation `sd = (high - low) / 6`. For a running task, `p = max(progress, live share) / 100`; remaining time is `E * (1 - p)`. A task past its expected elapsed duration with zero progress is marked overrunning, but its forecast still follows that remaining-time rule.
-
-Milestone completion is the weighted share: completed tasks count fully, in-progress tasks count their explicit `progress`, and pending tasks count zero. The 50th-percentile (P50) forecast uses expected remaining durations. The 90th-percentile (P90) forecast adds `1.2816 * sqrt(sum of remaining variances)` along each controlling dependency chain, then takes the latest end. Remaining standard deviations scale by `1 - p`. These are planning approximations, not calibrated probabilities. Missing estimates, missing blockers and dependency cycles produce unknown forecasts. Completed tasks with no history do not block future work. Estimates extending beyond the representable calendar produce warnings.
+Load the [live-gantt skill](skills/live-gantt/SKILL.md) when creating or updating a multi-step plan, or starting agents and external runs attached to it. That is the task-metadata contract, including field guidance, a two-lane plan and the external-run lifecycle. The chart never writes task metadata itself.
 
 ## Interfaces and verification
 
@@ -98,6 +85,29 @@ python3 -B -m unittest
 node --check live_gantt/static/app.js
 ```
 
-Tests use temporary fixtures, never your Claude configuration. HTTP tests open an ephemeral loopback listener; a sandbox that denies binding sockets cannot run those tests. On this Mac, run checks at utility priority with `taskpolicy -c utility python3 -B -m unittest`.
+Tests use invented fixtures and temporary directories, never your Claude configuration. HTTP tests open an ephemeral loopback listener; a sandbox that denies binding sockets cannot run those tests. On this Mac, run checks at utility priority with `taskpolicy -c utility python3 -B -m unittest`.
+
+Continuous integration (CI) runs the same unit tests and JavaScript syntax check on Ubuntu and macOS with Python 3.11 and the latest stable Python.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for source and projection boundaries.
+
+## Uninstall
+
+Stop and unregister the per-user service from a checkout or plugin directory:
+
+```sh
+./scripts/uninstall.sh
+```
+
+It stops the process and removes the service definition, copied application, recorded configuration and installed-version marker. Removing the marker keeps the SessionStart hook from reinstalling a service you chose to remove. Logs and Claude Code files are retained. On macOS, logs are in the user's Library Logs directory; on Linux, use `journalctl --user -u live-gantt.service`.
+
+For a plugin installation, also run in Claude Code:
+
+```text
+/plugin uninstall live-gantt@live-gantt
+/plugin marketplace remove live-gantt
+```
+
+Removing the plugin alone does not unregister the service. Foreground-only use needs no uninstall step beyond stopping the process.
+
+Made by al-Kindi (https://alkindi.pt)

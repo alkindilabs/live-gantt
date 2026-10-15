@@ -5,7 +5,7 @@
     <key>Label</key><string>local.live-gantt</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>@PYTHON@</string>
         <string>-B</string>
         <string>-m</string>
         <string>live_gantt</string>
