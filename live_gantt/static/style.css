@@ -27,6 +27,10 @@
   --shadow: 0 12px 36px #18233426;
   --label-width: 246px;
   --plot-width: 800px;
+  --row-height: 24px;
+  --bar-height: 16px;
+  --bar-top: calc((var(--row-height) - var(--bar-height)) / 2);
+  --mark-height: 3px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -105,28 +109,34 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; font-weight: 650; letter-spac
 .notice { margin: 16px; color: var(--muted); }
 .timeline { position: relative; max-height: 68vh; min-height: 130px; overflow: auto; overscroll-behavior-x: contain; border-top: 1px solid var(--line); }
 .timeline-content { width: calc(var(--label-width) + var(--plot-width)); min-width: 100%; position: relative; }
-.timeline-row { display: flex; min-height: 54px; }
-.row-label { position: sticky; left: 0; z-index: 3; flex: 0 0 var(--label-width); width: var(--label-width); padding: 9px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--grid); background: var(--surface); text-align: left; overflow: hidden; }
+.timeline-row { display: flex; min-height: var(--row-height); }
+.row-label { position: sticky; left: 0; z-index: 3; flex: 0 0 var(--label-width); width: var(--label-width); padding: 3px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--grid); background: var(--surface); text-align: left; overflow: hidden; }
 button.row-label { border-radius: 0; border-top: 0; border-left: 0; }
 .row-label:hover { background: var(--surface-muted); }
 .row-label:focus-visible { z-index: 6; outline-offset: -3px; }
 .task-title { display: block; font-size: 12px; font-weight: 550; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .task-id { color: var(--muted); font-weight: 400; }
-.task-subtitle { display: block; font-size: 10px; line-height: 1.6; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.row-plot { position: relative; flex: 0 0 var(--plot-width); width: var(--plot-width); min-height: 54px; border-bottom: 1px solid var(--grid); background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px); background-size: var(--tick-width) 100%; background-position-x: var(--tick-offset); overflow: visible; }
+.task-label { display: flex; align-items: center; gap: 6px; }
+.task-main { flex: 1; min-width: 0; padding: 0; border: 0; border-radius: 3px; background: transparent; text-align: left; }
+.task-main:hover { background: transparent; }
+.task-main:focus-visible { outline-offset: 1px; }
+.task-label:hover, .task-label:has(.task-main:hover) { background: var(--surface-muted); }
+.attempts-badge { flex: 0 0 auto; padding: 0 6px; border-radius: 8px; font-size: 10px; line-height: 14px; color: var(--muted); background: var(--surface-muted); }
+.attempts-badge[aria-expanded="true"] { background: var(--text); border-color: var(--text); color: var(--surface); }
+.row-plot { position: relative; flex: 0 0 var(--plot-width); width: var(--plot-width); min-height: var(--row-height); border-bottom: 1px solid var(--grid); background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px); background-size: var(--tick-width) 100%; background-position-x: var(--tick-offset); overflow: visible; }
 .axis-row { position: sticky; top: 0; min-height: 52px; z-index: 8; border-bottom: 1px solid var(--line); }
 .axis-row .row-label { z-index: 9; color: var(--muted); font-size: 11px; padding-top: 17px; background: var(--surface-muted); }
 .axis-row .row-plot { min-height: 52px; background-color: var(--surface-muted); overflow: visible; }
 .axis-tick { position: absolute; top: 8px; padding-left: 6px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .axis-tick strong { display: block; color: var(--text); font-size: 11px; font-weight: 500; }
-.lane-row { min-height: 31px; }
-.lane-row .row-label { padding-top: 6px; padding-bottom: 6px; background: var(--surface-muted); font-size: 11px; font-weight: 600; }
-.lane-row .row-plot { min-height: 31px; background-color: var(--surface-muted); }
+.lane-row { min-height: calc(var(--row-height) + 2px); }
+.lane-row .row-label { padding-top: 4px; padding-bottom: 4px; background: var(--surface-muted); font-size: 11px; font-weight: 600; }
+.lane-row .row-plot { min-height: calc(var(--row-height) + 2px); background-color: var(--surface-muted); }
 .lane-count { color: var(--muted); margin-left: 6px; font-weight: 400; }
 .now-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--now); pointer-events: none; z-index: 2; }
 .now-label { position: absolute; bottom: 0; left: -13px; padding: 1px 4px; background: var(--now); border-radius: 3px 3px 0 0; color: var(--surface); font-size: 9px; line-height: 1.5; }
-.bar { position: absolute; top: 14px; height: 25px; border-radius: 4px; font-size: 10px; line-height: 22px; white-space: nowrap; z-index: 1; text-align: left; }
-.bar-label { position: absolute; top: 14px; width: max-content; white-space: nowrap; font-size: 10px; line-height: 25px; color: var(--muted); z-index: 2; }
+.bar { position: absolute; top: var(--bar-top); height: var(--bar-height); border-radius: 4px; font-size: 10px; line-height: 12px; white-space: nowrap; z-index: 1; text-align: left; }
+.bar-label { position: absolute; top: var(--bar-top); width: max-content; white-space: nowrap; font-size: 10px; line-height: var(--bar-height); color: var(--muted); z-index: 2; }
 .bar:focus-visible { z-index: 4; outline-offset: 2px; }
 .done { background-color: var(--done-fill); border: 1px solid var(--done); color: var(--done); }
 .running { background-color: var(--running-fill); border: 1px solid var(--running); border-top-width: 3px; color: var(--running); }
@@ -138,13 +148,16 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; }
 .bar.projected-tail { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .bar.has-tail { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .live-dot { position: absolute; top: calc(50% - 2.5px); left: 4px; width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: breathe 2s ease-in-out infinite; }
-.row-marker { position: absolute; top: 18px; left: 13px; color: var(--muted); font-size: 11px; }
+.row-marker { position: absolute; top: var(--bar-top); left: 13px; color: var(--muted); font-size: 11px; line-height: var(--bar-height); }
 .row-marker.warning { color: var(--warning); }
-.child-row, .child-row .row-plot { min-height: 29px; }
-.child-row .row-label { padding: 5px 14px 5px 27px; }
+.bar.attempt-mark { top: calc(var(--bar-top) + var(--bar-height) + 1px); height: var(--mark-height); border: 0; border-radius: 1px; background: currentColor; }
+.bar.summary-bar { top: calc(var(--row-height) / 2 - 3px); height: 6px; border-radius: 3px; }
+.summary-row .row-label { color: var(--done); }
+.child-row, .child-row .row-plot { min-height: 20px; }
+.child-row .row-label { padding: 2px 14px 2px 27px; }
 .child-row .task-title { font-size: 10px; font-weight: 400; }
-.child-row .bar { top: 8px; height: 14px; line-height: 12px; font-size: 9px; border-radius: 3px; }
-.child-row .bar-label { top: 7px; line-height: 15px; }
+.child-row .bar { top: 3px; height: 14px; line-height: 12px; font-size: 9px; border-radius: 3px; }
+.child-row .bar-label { top: 3px; line-height: 14px; }
 .chart-help { margin: 8px 14px 10px; font-size: 10px; color: var(--muted); }
 .source-warnings { font-size: 12px; color: var(--warning); margin: 12px 0; }
 .source-warnings p { margin: 4px 0; }

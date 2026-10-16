@@ -17,6 +17,11 @@ const BAR_LABEL_GAP = 7;
 const DESIRED_TICK_WIDTH = 100;
 const DEFAULT_ZOOM = "12h";
 const ZOOM_STORAGE_KEY = "live-gantt.zoom";
+const EXPANDED_STORAGE_KEY = "live-gantt.expanded";
+const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
+const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
+const FOLDED_DISCLOSURE = "\u25b8";
+const EXPANDED_DISCLOSURE = "\u25be";
 const TICK_STEPS = [15 * MINUTE, 30 * MINUTE, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
 const ZOOMS = {
   "12h": { span: 12 * HOUR, pixels: 1008 },
@@ -32,6 +37,14 @@ function savedZoom() {
   return DEFAULT_ZOOM;
 }
 
+function savedExpanded() {
+  try {
+    const keys = JSON.parse(localStorage.getItem(EXPANDED_STORAGE_KEY));
+    if (Array.isArray(keys)) return new Set(keys.filter(key => typeof key === "string"));
+  } catch {}
+  return new Set();
+}
+
 const elements = Object.fromEntries(
   ["session", "project", "connection", "connection-text", "freshness", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
@@ -41,6 +54,7 @@ const state = {
   selected: null,
   stream: null,
   zoom: savedZoom(),
+  expanded: savedExpanded(),
   showOlder: false,
   follow: true,
   connected: false,
@@ -55,6 +69,7 @@ const state = {
   detailPinned: false,
   detailKey: null,
   detailEntries: new Map(),
+  focusTargets: new Map(),
   observations: new Map(),
 };
 
@@ -380,8 +395,19 @@ function showDetails(item, kind, pinned = false, key = null) {
   elements.details.hidden = false;
 }
 
+function registerFocus(target, key) {
+  target.dataset.focusKey = key;
+  state.focusTargets.set(key, target);
+}
+
+function toggleExpanded(key) {
+  if (!state.expanded.delete(key)) state.expanded.add(key);
+  try { localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify([...state.expanded])); } catch {}
+  renderTimeline(Date.now());
+}
+
 function attachDetails(target, item, kind, key) {
-  target.dataset.detailKey = key;
+  registerFocus(target, key);
   state.detailEntries.set(key, { target, item, kind });
   target.addEventListener("mouseenter", () => showDetails(item, kind, false, key));
   target.addEventListener("mouseleave", () => {
@@ -420,27 +446,70 @@ function waitingLabel(task) {
   return `after ${task.waitingFor.map(id => `#${id}`).join(", ")}`;
 }
 
+function expansionKey(...parts) {
+  return JSON.stringify([state.selected, ...parts]);
+}
+
 function renderTask(task) {
-  const label = node("button", "row-label");
-  label.type = "button";
+  const finished = (task.agents || []).filter(agent => !LIVE_AGENT_STATUSES.has(agent.status));
+  const attemptsKey = expansionKey("attempts", task.id);
+  const attemptsShown = state.expanded.has(attemptsKey);
+  const label = node("div", "row-label task-label");
+  const main = node("button", "task-main");
+  main.type = "button";
   const title = node("span", "task-title");
   title.append(node("span", "task-id", `#${task.id} `), document.createTextNode(task.subject || "Untitled task"));
-  const subtitle = node("span", "task-subtitle", taskSubtitle(task));
-  label.append(title, subtitle);
-  label.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskSubtitle(task)}. Show details.`);
-  attachDetails(label, task, "task", `task:${task.id}`);
+  main.append(title);
+  main.title = taskSubtitle(task);
+  main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskSubtitle(task)}. Show details.`);
+  attachDetails(main, task, "task", `task:${task.id}`);
+  label.append(main);
+  if (finished.length) label.append(attemptsBadge(task, finished.length, attemptsKey, attemptsShown));
   const track = makeTrack();
-  state.tracks.push({ track, item: task, kind: "task", subtitle });
+  state.tracks.push({ track, item: task, kind: "task", main, finished });
   makeRow(label, track);
-  for (const agent of task.agents || []) renderChild(agent, "agent", `task:${task.id}:agent:${agent.id}`);
+  for (const agent of task.agents || []) {
+    if (LIVE_AGENT_STATUSES.has(agent.status) || attemptsShown) renderChild(agent, "agent", `task:${task.id}:agent:${agent.id}`);
+  }
   for (const [index, run] of (task.runs || []).entries()) renderChild(run, "run", `task:${task.id}:run:${index}`);
+}
+
+function attemptsBadge(task, count, key, shown) {
+  const badge = node("button", "attempts-badge", `${count} ${count === 1 ? "attempt" : "attempts"}`);
+  badge.type = "button";
+  badge.setAttribute("aria-expanded", String(shown));
+  badge.setAttribute("aria-label", `${shown ? "Hide" : "Show"} ${count} finished agent ${count === 1 ? "attempt" : "attempts"} on task ${task.id}`);
+  registerFocus(badge, key);
+  badge.addEventListener("click", () => toggleExpanded(key));
+  return badge;
+}
+
+function renderSummary(lane, milestone, tasks) {
+  const key = expansionKey("done", lane, milestone ?? null);
+  const shown = state.expanded.has(key);
+  const spans = tasks.map(task => [timestamp(task.started), timestamp(task.ended)]).filter(([start, end]) => start !== null && end !== null);
+  const worked = spans.reduce((total, [start, end]) => total + end - start, 0);
+  const text = `${milestone ? `${milestone} \u00b7 ` : ""}${tasks.length} done${worked ? `, ${hours(worked / HOUR)}` : ""}`;
+  const label = node("button", "row-label");
+  label.type = "button";
+  label.append(node("span", "task-title", `${shown ? EXPANDED_DISCLOSURE : FOLDED_DISCLOSURE} ${text}`));
+  label.title = `${shown ? "Fold" : "Show"} finished work: ${text}`;
+  label.setAttribute("aria-expanded", String(shown));
+  registerFocus(label, key);
+  label.addEventListener("click", () => toggleExpanded(key));
+  const track = makeTrack();
+  const starts = spans.map(([start]) => start);
+  const ends = spans.map(([, end]) => end);
+  state.tracks.push({ track, item: { started: Math.min(...starts), ended: Math.max(...ends) }, kind: "summary" });
+  makeRow(label, track, "summary-row");
+  if (shown) for (const task of tasks) renderTask(task);
 }
 
 function renderChild(item, kind, key) {
   const label = node("button", "row-label");
   label.type = "button";
   const title = kind === "run" ? item.label || "Run" : item.description || `Agent ${item.id}`;
-  label.append(node("span", "task-title", `${titleCase(item.status)} · ${title}`));
+  label.append(node("span", "task-title", `${titleCase(item.status)} \u00b7 ${title}`));
   label.title = title;
   attachDetails(label, item, kind, key);
   const track = makeTrack();
@@ -493,23 +562,34 @@ function paintTask(track, task, now) {
   }
 }
 
+function agentClass(item) {
+  return item.status === "running" ? "running" : item.status === "silent" ? "silent" : item.status === "completed" ? "done" : "blocked";
+}
+
+function agentEnd(item, now) {
+  return timestamp(item.ended) ?? (LIVE_AGENT_STATUSES.has(item.status) ? now : timestamp(item.lastActivityAt));
+}
+
 function paintChild(track, item, now) {
-  const start = timestamp(item.started);
-  const end = timestamp(item.ended);
-  const live = item.status === "running";
-  const className = live ? "running" : item.status === "silent" ? "silent" : item.status === "completed" ? "done" : "blocked";
-  const latest = end ?? (live || item.status === "silent" ? now : timestamp(item.lastActivityAt));
-  createBar(track, className, start, latest, item.activity, live);
+  createBar(track, agentClass(item), timestamp(item.started), agentEnd(item, now), item.activity, item.status === "running");
+}
+
+function paintAttempts(track, attempts, now) {
+  for (const attempt of attempts) {
+    const mark = createBar(track, `attempt-mark ${agentClass(attempt)}`, timestamp(attempt.started), agentEnd(attempt, now));
+    if (mark) mark.title = `${titleCase(attempt.status)} \u00b7 ${attempt.description || `Agent ${attempt.id}`}`;
+  }
 }
 
 function paintTimeline(now) {
   if (!state.range) return;
-  for (const { track, item, kind, subtitle } of state.tracks) {
+  for (const { track, item, kind, main, finished } of state.tracks) {
     for (const old of track.querySelectorAll(".bar, .bar-label, .row-marker")) old.remove();
     if (kind === "task") {
       paintTask(track, item, now);
-      subtitle.textContent = taskSubtitle(item, now);
-    }
+      paintAttempts(track, finished, now);
+      main.title = taskSubtitle(item, now);
+    } else if (kind === "summary") createBar(track, "done summary-bar", timestamp(item.started), timestamp(item.ended));
     else paintChild(track, item, now);
   }
   for (const line of elements["timeline-content"].querySelectorAll(".now-line")) {
@@ -568,14 +648,21 @@ function activeInWindow(agent, now) {
   return start !== null && end !== null && start <= state.range.end && end >= state.range.start;
 }
 
+function isFinishedLongAgo(task, now) {
+  if (task.status !== "completed") return false;
+  const ended = timestamp(task.ended);
+  return ended === null || now - ended > RECENTLY_FINISHED_WINDOW;
+}
+
 function renderTimeline(now, resetRange = false) {
   if (!state.range || resetRange) setRange(now);
   const previousScroll = elements.timeline.scrollLeft;
   const previousTop = elements.timeline.scrollTop;
-  const focusedKey = document.activeElement?.dataset.detailKey;
+  const focusedKey = document.activeElement?.dataset.focusKey;
   elements["timeline-content"].replaceChildren();
   state.tracks = [];
   state.detailEntries = new Map();
+  state.focusTargets = new Map();
   renderAxis();
   const lanes = new Map();
   for (const task of state.model.tasks || []) {
@@ -585,7 +672,15 @@ function renderTimeline(now, resetRange = false) {
   }
   for (const [name, tasks] of lanes) {
     renderLane(name, tasks.length);
-    for (const task of tasks) renderTask(task);
+    const folded = new Map();
+    const open = [];
+    for (const task of tasks) {
+      if (!isFinishedLongAgo(task, now)) open.push(task);
+      else if (folded.has(task.milestone)) folded.get(task.milestone).push(task);
+      else folded.set(task.milestone, [task]);
+    }
+    for (const [milestone, finished] of folded) renderSummary(name, milestone, finished);
+    for (const task of open) renderTask(task);
   }
   const agents = (state.model.agents || []).filter(agent => activeInWindow(agent, now));
   if (agents.length) {
@@ -596,7 +691,7 @@ function renderTimeline(now, resetRange = false) {
   elements.timeline.scrollTop = previousTop;
   if (state.follow) followNow(now);
   else setScroll(previousScroll);
-  state.detailEntries.get(focusedKey)?.target.focus({ preventScroll: true });
+  state.focusTargets.get(focusedKey)?.focus({ preventScroll: true });
   if (state.detailPinned) {
     const selected = state.detailEntries.get(state.detailKey);
     if (selected) showDetails(selected.item, selected.kind, true, state.detailKey);
