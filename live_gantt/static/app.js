@@ -503,7 +503,7 @@ function showDetails(item, kind, pinned = false, key = null) {
   state.detailKey = key;
   const content = elements["details-content"];
   content.replaceChildren();
-  const heading = item.subject || item.label || item.description || `Agent ${item.id}`;
+  const heading = item.subject || item.label || item.name || item.description || `Agent ${item.id}`;
   content.append(node("h2", "", heading));
   if (item.description && item.description !== heading) content.append(node("p", "", item.description));
   const fields = node("dl");
@@ -517,6 +517,8 @@ function showDetails(item, kind, pinned = false, key = null) {
   detailField(fields, "Created", item.created ? dateTime(item.created, true) : undefined);
   detailField(fields, "Started", item.started ? dateTime(item.started, true) : undefined);
   detailField(fields, "Ended", item.ended ? dateTime(item.ended, true) : undefined);
+  detailField(fields, "Workflow", item.workflow);
+  detailField(fields, "Phase", item.phase);
   detailField(fields, "Agent type", item.agentType);
   detailField(fields, "Branch", item.worktreeBranch);
   detailField(fields, "Last activity", item.lastActivityAt ? dateTime(item.lastActivityAt, true) : undefined);
@@ -610,7 +612,11 @@ function renderTask(task) {
   main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskSubtitle(task)}. Show details.`);
   attachDetails(main, task, "task", `task:${task.id}`);
   label.append(main);
-  if (finished.length) label.append(attemptsBadge(task, finished.length, attemptsKey, attemptsShown));
+  if (finished.length) {
+    const count = finished.length;
+    const noun = count === 1 ? "attempt" : "attempts";
+    label.append(foldBadge(`${count} ${noun}`, `finished agent ${noun} on task ${task.id}`, attemptsKey, attemptsShown));
+  }
   const track = makeTrack();
   state.tracks.push({ track, item: task, kind: "task", main, finished });
   makeRow(label, track);
@@ -620,14 +626,36 @@ function renderTask(task) {
   for (const [index, run] of (task.runs || []).entries()) renderChild(run, "run", `task:${task.id}:run:${index}`);
 }
 
-function attemptsBadge(task, count, key, shown) {
-  const badge = node("button", "attempts-badge", `${count} ${count === 1 ? "attempt" : "attempts"}`);
+function foldBadge(text, folded, key, shown) {
+  const badge = node("button", "attempts-badge", text);
   badge.type = "button";
   badge.setAttribute("aria-expanded", String(shown));
-  badge.setAttribute("aria-label", `${shown ? "Hide" : "Show"} ${count} finished agent ${count === 1 ? "attempt" : "attempts"} on task ${task.id}`);
+  badge.setAttribute("aria-label", `${shown ? "Hide" : "Show"} ${folded}`);
   registerFocus(badge, key);
   badge.addEventListener("click", () => toggleExpanded(key));
   return badge;
+}
+
+function renderWorkflow(workflow) {
+  const agents = workflow.agents || [];
+  const finished = agents.filter(agent => !LIVE_AGENT_STATUSES.has(agent.status));
+  const key = expansionKey("workflow", workflow.id);
+  const shown = state.expanded.has(key);
+  const label = node("div", "row-label task-label");
+  const main = node("button", "task-main");
+  main.type = "button";
+  main.append(node("span", "task-title", workflow.name));
+  main.title = workflow.description || workflow.name;
+  main.setAttribute("aria-label", `Workflow ${workflow.name}: ${titleCase(workflow.status)}. Show details.`);
+  attachDetails(main, workflow, "workflow", `workflow:${workflow.id}`);
+  label.append(main);
+  if (finished.length) label.append(foldBadge(`${finished.length}/${agents.length} done`, `${plural(finished.length, "finished agent")} of workflow ${workflow.name}`, key, shown));
+  const track = makeTrack();
+  state.tracks.push({ track, item: workflow, kind: "workflow", finished });
+  makeRow(label, track);
+  for (const agent of agents) {
+    if (LIVE_AGENT_STATUSES.has(agent.status) || shown) renderChild(agent, "agent", `workflow:${workflow.id}:agent:${agent.id}`);
+  }
 }
 
 function renderSummary(lane, milestone, tasks) {
@@ -741,7 +769,10 @@ function paintTimeline(now) {
       paintAttempts(track, finished, now);
       main.title = taskSubtitle(item, now);
     } else if (kind === "summary") createBar(track, "done summary-bar", timestamp(item.started), timestamp(item.ended));
-    else paintChild(track, item, now);
+    else if (kind === "workflow") {
+      paintChild(track, item, now);
+      paintAttempts(track, finished, now);
+    } else paintChild(track, item, now);
   }
   for (const line of elements["timeline-content"].querySelectorAll(".now-line")) {
     line.style.left = `${xPosition(now)}px`;
@@ -837,6 +868,11 @@ function renderTimeline(now, resetRange = false) {
   if (agents.length) {
     renderLane("Agents", agents.length);
     for (const agent of agents) renderChild(agent, "agent", `agent:${agent.id}`);
+  }
+  const workflows = (state.model.workflows || []).filter(workflow => activeInWindow(workflow, now));
+  if (workflows.length) {
+    renderLane("Workflows", workflows.length);
+    for (const workflow of workflows) renderWorkflow(workflow);
   }
   paintTimeline(now);
   elements.timeline.scrollTop = previousTop;
