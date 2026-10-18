@@ -216,6 +216,62 @@ class SourceStoreTests(unittest.TestCase):
                    self.tool("2026-10-15T11:51:00Z", "Read", {"file_path": "/example/notes"}, "read"))
         self.assertEqual(self.agents_by_id()["worker"]["activity"], "")
 
+    def workflow(self, run_id, journal, agents):
+        run_dir = self.project_dir / self.list_id / "subagents" / "workflows" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self.append(*journal, path=run_dir / "journal.jsonl")
+        for agent_id, (label, phase, records) in agents.items():
+            self.agent(agent_id, *records, directory=run_dir,
+                       meta={"agentType": "workflow-subagent", "description": label, "workflowPhase": phase})
+
+    def launch(self, timestamp, run_id, task_id, name, summary):
+        launched = self.result(timestamp, f"Workflow launched in background. Task ID: {task_id}", "launch")
+        launched["toolUseResult"] = {"status": "async_launched", "taskId": task_id, "taskType": "local_workflow",
+                                     "workflowName": name, "runId": run_id, "summary": summary}
+        return launched
+
+    def test_workflow_agents_are_grouped_under_their_run_with_labels_and_state(self):
+        self.task(metadata={"agents": ["assigned"]})
+        self.append(self.tool("2026-10-15T11:00:00Z", "Workflow", {"description": "Review"}, "launch"),
+                    self.launch("2026-10-15T11:00:01Z", "wf_one", "workflow-task", "review-flow", "Review the change"))
+        started = [{"type": "started", "key": f"k{index}", "agentId": agent_id, "label": label, "phase": phase}
+                   for index, (agent_id, label, phase) in enumerate((
+                       ("reviewer", "review:correctness", "Review"), ("measurer", "measure", "Review"),
+                       ("verifier", "verify", "Verify"), ("assigned", "review:assigned", "Review")))]
+        self.workflow("wf_one", [{"type": "launched"}, *started, {"type": "result", "key": "k0", "agentId": "reviewer", "result": {}}], {
+            "reviewer": ("review:correctness", "Review", [self.tool("2026-10-15T11:01:00Z", "Bash", {"description": "Read"})]),
+            "measurer": ("measure", "Review", [self.tool("2026-10-15T11:55:00Z", "Bash", {"description": "Measure"})]),
+            "verifier": ("verify", "Verify", [self.tool("2026-10-15T11:20:00Z", "StructuredOutput", {}, "out"),
+                                              self.hand_back("2026-10-15T11:20:01Z", "out")]),
+            "assigned": ("review:assigned", "Review", [self.tool("2026-10-15T11:02:00Z", "Bash", {"description": "Check"})]),
+        })
+        state = self.state()
+        self.assertEqual(state["agents"], [])
+        self.assertEqual([agent["id"] for agent in state["tasks"][0]["agents"]], ["assigned"])
+        workflow, = state["workflows"]
+        self.assertEqual((workflow["id"], workflow["name"], workflow["description"]), ("wf_one", "review-flow", "Review the change"))
+        self.assertEqual((workflow["status"], workflow["started"], workflow["ended"]), ("running", "2026-10-15T11:00:01Z", None))
+        self.assertEqual([(agent["id"], agent["description"], agent["phase"], agent["status"]) for agent in workflow["agents"]], [
+            ("reviewer", "review:correctness", "Review", "completed"),
+            ("measurer", "measure", "Review", "running"),
+            ("verifier", "verify", "Verify", "completed"),
+        ])
+        self.assertEqual(workflow["agents"][0]["workflow"], "review-flow")
+        self.assertEqual(self.store.lists()[0]["agentCount"], 4)
+        self.append({"type": "user", "timestamp": "2026-10-15T11:58:00Z", "message": {"content": self.notification("workflow-task", "killed")}})
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["status"], workflow["ended"]), ("killed", "2026-10-15T11:58:00Z"))
+        self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [
+            ("completed", "2026-10-15T11:01:00Z"), ("killed", "2026-10-15T11:55:00Z"), ("completed", "2026-10-15T11:20:01Z")])
+
+    def test_a_workflow_without_its_launch_record_is_named_by_its_run_and_falls_silent(self):
+        self.workflow("wf_two", [{"type": "started", "key": "k", "agentId": "quiet", "label": "survey", "phase": "Scan"}], {
+            "quiet": ("survey", "Scan", [self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Scan"})]),
+        })
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["name"], workflow["status"], workflow["started"]), ("wf_two", "silent", "2026-10-15T11:00:00Z"))
+        self.assertEqual(workflow["agents"][0]["status"], "silent")
+
     def test_metadata_validation_live_journal_and_run_activity(self):
         journal = self.task_dir / "work.jsonl"
         journal.write_text('{"type":"result"}\n{"type": "result"}\n{"type":"other"}\n')

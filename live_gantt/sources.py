@@ -229,6 +229,17 @@ def _agent_ids(directory: Path) -> set[str]:
     return agent_ids
 
 
+def _workflow_runs(agents_directory: Path) -> list[Path]:
+    """Return the run directories of a session's workflows, each holding its agents' transcripts and a journal."""
+    runs = [path for path in _children(agents_directory / "workflows")
+            if (file_stat := _stat(path)) and stat.S_ISDIR(file_stat.st_mode)]
+    return sorted(runs, key=lambda path: path.name)
+
+
+def _agent_count(agents_directory: Path) -> int:
+    return len(_agent_ids(agents_directory)) + sum(len(_agent_ids(run)) for run in _workflow_runs(agents_directory))
+
+
 def _line_is_complete(line: bytes, tokens: tuple[bytes, ...]) -> bool:
     if line.endswith(b"\n"):
         return True
@@ -264,6 +275,16 @@ class _TaskHistory:
 
 
 @dataclass
+class _WorkflowLaunch:
+    """What the parent's Workflow tool result says about a run: its name, summary, background task and launch time."""
+
+    name: str
+    summary: str
+    task_id: str
+    launched: datetime
+
+
+@dataclass
 class _Transcript:
     identity: tuple[int, int] | None = None
     offset: int = 0
@@ -275,6 +296,7 @@ class _Transcript:
     handed_back: datetime | None = None
     naming: _Naming = field(default_factory=_Naming)
     histories: dict[str, _TaskHistory] = field(default_factory=dict)
+    workflows: dict[str, _WorkflowLaunch] = field(default_factory=dict)
     notifications: dict[str, tuple[str, datetime]] = field(default_factory=dict)
     agent_aliases: dict[str, str] = field(default_factory=dict)
 
@@ -297,6 +319,7 @@ class _Transcript:
             return
         if record.get("toolEndsTurn") is True:
             self.handed_back = timestamp
+        self._read_workflow_launch(record.get("toolUseResult"), timestamp)
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for text in _texts(content) + _queued_texts(record):
@@ -348,6 +371,13 @@ class _Transcript:
             if task_id and status:
                 self.notifications[task_id.group(1).strip()] = (status.group(1).strip(), timestamp)
 
+    def _read_workflow_launch(self, result: Any, timestamp: datetime) -> None:
+        if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in ("runId", "workflowName", "taskId")):
+            return
+        summary = result.get("summary")
+        self.workflows[result["runId"]] = _WorkflowLaunch(result["workflowName"], summary if isinstance(summary, str) else "",
+                                                          result["taskId"], timestamp)
+
     def _read_agent_alias(self, text: str) -> None:
         agent = AGENT_ID_PATTERN.search(text)
         task = TASK_ID_PATTERN.search(text)
@@ -388,11 +418,35 @@ class _Identity:
 
 @dataclass
 class _Journal:
+    """An incrementally read journal: its count of result lines and, for a workflow's journal, which agents started and finished.
+
+    `started` maps each agent identifier to its label and phase in start order."""
+
     identity: tuple[int, int] | None = None
     offset: int = 0
     size: int = 0
     modified: int = 0
     finished: int = 0
+    started: dict[str, tuple[str, str]] = field(default_factory=dict)
+    results: set[str] = field(default_factory=set)
+
+    def _consume(self, line: bytes) -> None:
+        if RESULT_LINE_PATTERN.search(line):
+            self.finished += 1
+        if b'"agentId"' not in line:
+            return
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            return
+        agent_id = record.get("agentId") if isinstance(record, dict) else None
+        if not isinstance(agent_id, str) or not agent_id:
+            return
+        if record.get("type") == "started":
+            label, phase = record.get("label"), record.get("phase")
+            self.started[agent_id] = (label if isinstance(label, str) else "", phase if isinstance(phase, str) else "")
+        elif record.get("type") == "result":
+            self.results.add(agent_id)
 
 
 @dataclass
@@ -450,13 +504,18 @@ class SourceStore:
             listing = self._listing(session, now, warnings, read_identity=True)
             tasks = [self._task(path, transcript) for path in self._task_paths(session.task_dir)]
             agents = self._agents(session, transcript, now, warnings)
+            workflows = self._workflows(session, transcript, now, warnings)
+            assignable = {**agents, **{agent["id"]: agent for workflow in workflows for agent in workflow["agents"]}}
             assigned: set[str] = set()
             for task in tasks:
                 agent_ids = task.pop("agentIds")
-                task["agents"] = [agents[agent_id] for agent_id in agent_ids if agent_id in agents]
+                task["agents"] = [assignable[agent_id] for agent_id in agent_ids if agent_id in assignable]
                 assigned.update(agent_ids)
+            for workflow in workflows:
+                workflow["agents"] = [agent for agent in workflow["agents"] if agent["id"] not in assigned]
             return {**listing, "transcriptUpdatedAt": _modified(session.transcript), "tasks": tasks,
-                    "agents": [agent for key, agent in agents.items() if key not in assigned], "warnings": warnings}
+                    "agents": [agent for key, agent in agents.items() if key not in assigned],
+                    "workflows": workflows, "warnings": warnings}
 
     def _sessions(self) -> dict[str, _Session]:
         sessions: dict[str, _Session] = {}
@@ -494,7 +553,7 @@ class SourceStore:
     def _listing(self, session: _Session, now: datetime, warnings: list[str], *,
                  read_identity: bool | None = None) -> dict[str, Any]:
         recent = session.modified >= (now - RECENT_SESSION_WINDOW).timestamp()
-        agent_count = len(_agent_ids(_agents_directory(session.transcript))) if session.transcript else 0
+        agent_count = _agent_count(_agents_directory(session.transcript)) if session.transcript else 0
         chartable = bool(session.task_count or agent_count)
         if read_identity is None:
             read_identity = recent or chartable
@@ -684,13 +743,13 @@ class SourceStore:
             warnings.append("live requires 0 <= from <= to <= 100")
             return 0
         path = self._path(journal, task_dir)
-        finished = self._finished(path)
-        if finished is None:
+        read = self._journal(path)
+        if read is None:
             warnings.append("live journal is unavailable")
             return 0
-        return start + (end - start) * min(finished / planned, 1)
+        return start + (end - start) * min(read.finished / planned, 1)
 
-    def _finished(self, path: Path) -> int | None:
+    def _journal(self, path: Path) -> _Journal | None:
         file_stat = _regular_stat(path)
         if file_stat is None:
             self._journals.pop(path, None)
@@ -705,15 +764,14 @@ class SourceStore:
             with path.open("rb") as stream:
                 stream.seek(cached.offset)
                 while line := stream.readline():
-                    if not _line_is_complete(line, (b'"result"',)):
+                    if not _line_is_complete(line, (b'"result"', b'"agentId"')):
                         break
-                    if RESULT_LINE_PATTERN.search(line):
-                        cached.finished += 1
+                    cached._consume(line)
                     cached.offset = stream.tell()
         except OSError:
             return None
         cached.size, cached.modified = file_stat.st_size, file_stat.st_mtime_ns
-        return cached.finished
+        return cached
 
     def _runs(self, metadata: dict[str, Any], task_dir: Path, warnings: list[str]) -> list[dict[str, Any]]:
         values = metadata.get("runs", [])
@@ -760,17 +818,65 @@ class SourceStore:
             notifications[parent.agent_aliases.get(task_id, task_id)] = notification
         agents: dict[str, dict[str, Any]] = {}
         for agent_id in sorted(agent_ids):
-            path = directory / f"agent-{agent_id}.jsonl"
-            transcript = self._transcript(path)
-            meta_path = directory / f"agent-{agent_id}.meta.json"
-            metadata = _read_json(meta_path, warnings) if _stat(meta_path) else {}
+            transcript = self._transcript(directory / f"agent-{agent_id}.jsonl")
             status, ended = _agent_state(transcript, notifications.get(agent_id), now)
-            agents[agent_id] = {
-                "id": agent_id, "description": self._text(metadata, "description", agent_id, warnings),
-                "agentType": self._text(metadata, "agentType", "", warnings),
-                "worktreeBranch": self._text(metadata, "worktreeBranch", "", warnings),
-                "started": _iso(transcript.first), "ended": _iso(ended),
-                "lastActivityAt": _iso(transcript.last), "activity": transcript.activity,
-                "status": status,
-            }
+            agents[agent_id] = self._agent(directory, agent_id, transcript, status, ended, warnings)
         return agents
+
+    def _agent(self, directory: Path, agent_id: str, transcript: _Transcript, status: str, ended: datetime | None,
+               warnings: list[str]) -> dict[str, Any]:
+        meta_path = directory / f"agent-{agent_id}.meta.json"
+        metadata = _read_json(meta_path, warnings) if _stat(meta_path) else {}
+        return {
+            "id": agent_id, "description": self._text(metadata, "description", agent_id, warnings),
+            "agentType": self._text(metadata, "agentType", "", warnings),
+            "worktreeBranch": self._text(metadata, "worktreeBranch", "", warnings),
+            "started": _iso(transcript.first), "ended": _iso(ended),
+            "lastActivityAt": _iso(transcript.last), "activity": transcript.activity,
+            "status": status,
+        }
+
+    def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> list[dict[str, Any]]:
+        """Return each workflow run with its agents in journal start order.
+
+        A journal result line or the agent's own hand-back finishes an agent. The run's state is its background
+        task's terminal notification; until then it runs while an agent runs and falls silent with its agents.
+        An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed."""
+        if session.transcript is None:
+            return []
+        workflows: list[dict[str, Any]] = []
+        for run in _workflow_runs(_agents_directory(session.transcript)):
+            launch = parent.workflows.get(run.name)
+            notification = parent.notifications.get(launch.task_id) if launch else None
+            run_ended = notification is not None and notification[0] not in LIVE_AGENT_STATUSES
+            run_status, notified = notification if run_ended else ("running", None)
+            journal = self._journal(run / "journal.jsonl") or _Journal()
+            name = launch.name if launch else run.name
+            agents: list[dict[str, Any]] = []
+            firsts: list[datetime] = []
+            lasts: list[datetime] = []
+            for agent_id in [*journal.started, *sorted(_agent_ids(run) - set(journal.started))]:
+                transcript = self._transcript(run / f"agent-{agent_id}.jsonl")
+                firsts += [transcript.first] if transcript.first else []
+                lasts += [transcript.last] if transcript.last else []
+                if agent_id in journal.results:
+                    status, ended = "completed", transcript.last
+                else:
+                    status, ended = _agent_state(transcript, None, now)
+                if run_ended and ended is None:
+                    status, ended = ("stopped" if run_status == "completed" else run_status), transcript.last
+                agent = self._agent(run, agent_id, transcript, status, ended, warnings)
+                label, phase = journal.started.get(agent_id, ("", ""))
+                agent.update(description=label or agent["description"], phase=phase, workflow=name)
+                agents.append(agent)
+            last = max(lasts, default=None)
+            if not run_ended:
+                live = any(agent["status"] == "running" for agent in agents)
+                quiet = last is not None and now - last >= SILENT_AFTER
+                run_status = "running" if live or not quiet else "silent"
+            workflows.append({
+                "id": run.name, "name": name, "description": launch.summary if launch else "",
+                "status": run_status, "started": _iso(launch.launched if launch else min(firsts, default=None)),
+                "ended": _iso(notified), "lastActivityAt": _iso(last), "activity": "", "agents": agents,
+            })
+        return workflows
