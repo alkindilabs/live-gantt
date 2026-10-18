@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from live_gantt.sources import SourceStore
+from live_gantt.sources import PROMPT_TITLE_CHARACTERS, SourceStore
 
 
 class SourceStoreTests(unittest.TestCase):
@@ -355,6 +355,31 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(state["title"], "Late first prompt")
         self.assertEqual(state["project"], "/late/project")
         self.assertEqual(self.store.lists()[0]["title"], "Late first prompt")
+
+    def test_title_skips_harness_wrappers_to_the_first_typed_prompt(self):
+        self.append(
+            {"type": "user", "isMeta": True, "message": {"content": "Plain caveat text the harness marks as meta"}},
+            {"type": "user", "message": {"content": "<local-command-caveat>Caveat: run locally.</local-command-caveat>"}},
+            {"type": "user", "message": {"content": "<command-name>/resume</command-name>\n"
+                                                    "<command-message>resume</command-message>\n<command-args></command-args>"}},
+            {"type": "user", "message": {"content": "<local-command-stdout>Resumed</local-command-stdout>"}},
+            {"type": "user", "message": {"content": [
+                {"type": "text", "text": "<system-reminder>\nContext\n</system-reminder>"},
+                {"type": "text", "text": "<pasted_content id=\"1\">log</pasted_content>\n\n  Fix the picker\nDetails"},
+            ]}},
+        )
+        self.assertEqual(self.store.lists()[0]["title"], "Fix the picker")
+        self.assertEqual(self.state()["title"], "Fix the picker")
+
+    def test_title_keeps_a_prompt_that_only_mentions_markup_and_bounds_its_length(self):
+        self.append({"type": "user", "message": {"content": "Why does <b>bold</b> break?"}})
+        self.assertEqual(self.store.lists()[0]["title"], "Why does <b>bold</b> break?")
+        other = self.project_dir / "long-session.jsonl"
+        self.append({"type": "user", "message": {"content": "word " * 200}}, path=other)
+        title = next(item["title"] for item in self.store.lists() if item["id"] == "long-session")
+        self.assertEqual(len(title), PROMPT_TITLE_CHARACTERS)
+        self.assertTrue(title.startswith("word word"))
+        self.assertTrue(title.endswith("…"))
 
 
 if __name__ == "__main__":

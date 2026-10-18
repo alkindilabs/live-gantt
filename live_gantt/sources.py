@@ -19,6 +19,7 @@ SILENT_AFTER = timedelta(minutes=30)
 RECENT_SESSION_WINDOW = timedelta(days=14)
 IDENTITY_SCAN_BYTES = 1024 * 1024
 IDENTITY_SCAN_LINES = 128
+PROMPT_TITLE_CHARACTERS = 120
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
 LIVE_AGENT_STATUSES = frozenset({"running", "in_progress", "pending"})
 TIMESTAMP_PATTERN = re.compile(rb'"timestamp"\s*:\s*"([^"\\]+)"')
@@ -30,6 +31,8 @@ TASK_ID_PATTERN = re.compile(r'(?:task_id|taskId)\s*[":=]+\s*["\s]*([\w-]+)')
 RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
 TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"')
 LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+LEADING_WRAPPER = re.compile(r"\s*<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1\s*>", re.DOTALL)
+ELLIPSIS = "\u2026"
 
 
 def default_root() -> Path:
@@ -135,6 +138,16 @@ def _texts(content: Any) -> list[str]:
     return []
 
 
+def _prompt_title(text: str) -> str:
+    """Return the first line a person typed, after any markup elements the harness put before it."""
+    while wrapper := LEADING_WRAPPER.match(text):
+        text = text[wrapper.end():]
+    line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if len(line) <= PROMPT_TITLE_CHARACTERS:
+        return line
+    return line[:PROMPT_TITLE_CHARACTERS - len(ELLIPSIS)] + ELLIPSIS
+
+
 def _line_is_complete(line: bytes, tokens: tuple[bytes, ...]) -> bool:
     if line.endswith(b"\n"):
         return True
@@ -235,14 +248,11 @@ class _Transcript:
         cwd = record.get("cwd")
         if not self.project and isinstance(cwd, str):
             self.project = cwd
-        if self.title or record.get("type") != "user":
+        if self.title or record.get("type") != "user" or record.get("isMeta") is True:
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        for text in _texts(content):
-            if text.strip() and not text.lstrip().startswith("<task-notification>"):
-                self.title = text.strip().splitlines()[0]
-                break
+        self.title = next((title for text in _texts(content) if (title := _prompt_title(text))), "")
 
     def _read_task_update(self, inputs: dict[str, Any], timestamp: datetime) -> None:
         task_id = _task_id(inputs.get("taskId"))
