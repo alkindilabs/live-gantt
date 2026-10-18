@@ -279,7 +279,7 @@ class SourceStoreTests(unittest.TestCase):
         self.assertNotIn(self.transcript, opened)
         self.assertNotIn(custom_title, opened)
         self.assertEqual(listing, {"id": self.list_id, "title": self.list_id, "prompt": "", "project": "",
-                                   "updatedAt": "2026-09-30T12:00:00Z", "recent": False, "live": False,
+                                   "updatedAt": "2026-09-30T12:00:00Z", "recent": False, "active": False,
                                    "chartable": False, "taskCount": 0, "agentCount": 0, "headless": False})
 
     def test_selecting_old_session_reads_its_identity_lazily(self):
@@ -406,7 +406,7 @@ class SourceStoreTests(unittest.TestCase):
         self.append({"type": "custom-title", "customTitle": "Renamed again", "sessionId": self.list_id})
         self.assertEqual(self.store.lists()[0]["title"], "Renamed again")
 
-    def test_index_says_which_sessions_can_draw_a_chart_and_which_are_live(self):
+    def test_index_says_which_sessions_can_draw_a_chart_and_which_are_active(self):
         self.task("1")
         self.task("2")
         self.append({"type": "user", "entrypoint": "cli", "cwd": "/work", "message": {"content": "Plan the release"}},
@@ -437,14 +437,14 @@ class SourceStoreTests(unittest.TestCase):
 
         def summary(list_id):
             listing = by_id[list_id]
-            return {key: listing[key] for key in ("chartable", "taskCount", "agentCount", "headless", "live")}
+            return {key: listing[key] for key in ("chartable", "taskCount", "agentCount", "headless", "active")}
 
         self.assertEqual(summary(self.list_id), {"chartable": True, "taskCount": 2, "agentCount": 0,
-                                                 "headless": False, "live": True})
+                                                 "headless": False, "active": True})
         self.assertEqual(summary("agents-session"), {"chartable": True, "taskCount": 0, "agentCount": 1,
-                                                     "headless": False, "live": False})
+                                                     "headless": False, "active": False})
         self.assertEqual(summary("gate-run"), {"chartable": False, "taskCount": 0, "agentCount": 0,
-                                               "headless": True, "live": True})
+                                               "headless": True, "active": True})
         self.assertEqual(by_id[self.list_id]["title"], "release.1015-0900.abcd")
         self.assertEqual(by_id[self.list_id]["prompt"], "Plan the release")
         self.assertEqual(by_id["agents-session"]["prompt"], "")

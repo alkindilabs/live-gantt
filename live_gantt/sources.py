@@ -480,7 +480,7 @@ class SourceStore:
         title = title or session.id
         return {"id": session.id, "title": title, "prompt": "" if naming.prompt == title else naming.prompt,
                 "project": naming.project, "updatedAt": _iso(updated), "recent": recent,
-                "live": session_active(transcript_updated, now), "chartable": chartable,
+                "active": session_active(transcript_updated, now), "chartable": chartable,
                 "taskCount": session.task_count, "agentCount": agent_count,
                 "headless": naming.entrypoint == HEADLESS_ENTRYPOINT}
 

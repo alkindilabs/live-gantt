@@ -95,7 +95,7 @@ The page uses read-only Hypertext Transfer Protocol (HTTP) endpoints:
 
 | Endpoint | Response |
 | --- | --- |
-| `/api/lists` | `{ "lists": [...] }`, ordered by recent source change. Each entry has `id`, `title`, `prompt` (the first prompt when a custom title hides it, else empty), `project`, `updatedAt`, `recent`, `live` (transcript changed within 5 minutes), `chartable` (has task files or agents), `taskCount`, `agentCount` and `headless` (a non-interactive `claude -p` run). Older entries that cannot draw a chart carry identifier/date with an identifier title and empty project. |
+| `/api/lists` | `{ "lists": [...] }`, ordered by recent source change. Each entry has `id`, `title`, `prompt` (the first prompt when a custom title hides it, else empty), `project`, `updatedAt`, `recent`, `active` (transcript changed within 5 minutes), `chartable` (has task files or agents), `taskCount`, `agentCount` and `headless` (a non-interactive `claude -p` run). Older entries that cannot draw a chart carry identifier/date with an identifier title and empty project. |
 | `/api/state?list=ID` | Full selected-session model with tasks, agents, milestones, warnings, `freshness`, `transcriptUpdatedAt` and an `observedAt` projection timestamp; an unknown list returns 404. |
 | `/events?list=ID` | Server-Sent Events (SSE): `state` on selected-source changes, `lists` when the picker changes, and a `heartbeat` event plus comment every 15 seconds. A removed session emits `missing`. |
 | `/favicon.ico` | Inline Scalable Vector Graphics (SVG) Gantt icon using the page's color tokens. |
