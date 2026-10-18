@@ -20,6 +20,12 @@ const ZOOM_STORAGE_KEY = "live-gantt.zoom";
 const EXPANDED_STORAGE_KEY = "live-gantt.expanded";
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
+const SESSION_HASH_PREFIX = "#session=";
+const MAX_LISTED_SESSIONS = 200;
+const OPTION_PAGE_STEP = 8;
+const PROJECT_PATH_SEGMENTS = 2;
+const ABSOLUTE_DATE_AFTER = 30 * DAY;
+const AGE_UNITS = [[DAY, "d"], [HOUR, "h"], [MINUTE, "min"]];
 const FOLDED_DISCLOSURE = "\u25b8";
 const EXPANDED_DISCLOSURE = "\u25be";
 const TICK_STEPS = [15 * MINUTE, 30 * MINUTE, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
@@ -46,7 +52,7 @@ function savedExpanded() {
 }
 
 const elements = Object.fromEntries(
-  ["session", "project", "connection", "connection-text", "freshness", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["session", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "freshness", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
@@ -55,7 +61,9 @@ const state = {
   stream: null,
   zoom: savedZoom(),
   expanded: savedExpanded(),
-  showOlder: false,
+  pickerAll: false,
+  pickerActive: null,
+  pickerShown: [],
   follow: true,
   connected: false,
   lastReceived: null,
@@ -131,42 +139,175 @@ function setNotice(message) {
   elements.notice.hidden = !message;
 }
 
-function renderLists(lists) {
-  state.lists = Array.isArray(lists) ? lists : [];
-  elements.session.replaceChildren();
-  if (!state.lists.length) {
-    elements.session.append(node("option", "", "No sessions"));
-    elements.session.disabled = true;
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function elapsedLabel(value, now) {
+  const time = timestamp(value);
+  if (time === null) return "Unknown date";
+  const elapsed = Math.max(0, now - time);
+  if (elapsed >= ABSOLUTE_DATE_AFTER) return new Date(time).toLocaleDateString();
+  const [unit, label] = AGE_UNITS.find(([size]) => elapsed >= size) || [];
+  return unit ? `${Math.floor(elapsed / unit)} ${label} ago` : "just now";
+}
+
+function shortProject(project) {
+  return String(project || "").split("/").filter(Boolean).slice(-PROJECT_PATH_SEGMENTS).join("/");
+}
+
+function sessionIdentity(list) {
+  if (list.id !== state.selected || !state.model) return list;
+  const { title, prompt, project } = state.model;
+  return { ...list, title, prompt, project };
+}
+
+function renderFacts(container, list, now) {
+  const facts = [list.active ? node("span", "session-active", "Active") : node("span", "", elapsedLabel(list.updatedAt, now))];
+  const project = shortProject(list.project);
+  if (project) facts.push(node("span", "", project));
+  const work = [list.taskCount && plural(list.taskCount, "task"), list.agentCount && plural(list.agentCount, "agent")].filter(Boolean);
+  if (work.length) facts.push(node("span", "", work.join(", ")));
+  if (list.headless) facts.push(node("span", "headless", "headless"));
+  container.replaceChildren(...facts);
+}
+
+function renderPicker() {
+  const selected = state.lists.find(list => list.id === state.selected);
+  elements.session.disabled = !state.lists.length;
+  if (!selected) {
+    elements["session-title"].textContent = state.lists.length ? "Choose a session" : "No sessions";
+    elements["session-meta"].replaceChildren();
     return;
   }
-  elements.session.disabled = false;
-  if (state.lists.some(list => list.id === state.selected && !list.recent)) state.showOlder = true;
-  if (!state.selected && !state.lists.some(list => list.recent)) {
-    const placeholder = node("option", "", "Choose a session");
-    placeholder.value = "";
-    placeholder.disabled = true;
-    elements.session.append(placeholder);
+  const identity = sessionIdentity(selected);
+  elements["session-title"].textContent = identity.title || identity.id;
+  renderFacts(elements["session-meta"], identity, Date.now());
+  elements.session.title = [identity.title, identity.project, "Switch session (/)"].filter(Boolean).join("\n");
+}
+
+function optionId(id) {
+  return `session-option-${id}`;
+}
+
+function pickerSessions() {
+  const words = elements["session-filter"].value.toLowerCase().split(/\s+/).filter(Boolean);
+  return state.lists.map(sessionIdentity).filter(list => {
+    if (!state.pickerAll && !list.chartable && list.id !== state.selected) return false;
+    const text = [list.title, list.prompt, list.project, list.id].join(" ").toLowerCase();
+    return words.every(word => text.includes(word));
+  });
+}
+
+function sessionOption(list, now) {
+  const option = node("li", "session-option");
+  option.id = optionId(list.id);
+  option.dataset.id = list.id;
+  option.setAttribute("role", "option");
+  option.setAttribute("aria-selected", String(list.id === state.selected));
+  option.title = [list.title, list.prompt, list.project].filter(Boolean).join("\n");
+  option.append(node("span", "session-option-title", list.title || list.id));
+  if (list.prompt) option.append(node("span", "session-option-prompt", list.prompt));
+  const facts = node("span", "session-meta");
+  renderFacts(facts, list, now);
+  option.append(facts);
+  return option;
+}
+
+function pickerSummary(matching, shown) {
+  const parts = [];
+  if (shown < matching) parts.push(`Showing ${shown} of ${matching}; type to narrow.`);
+  if (!state.pickerAll) {
+    const hidden = state.lists.filter(list => !list.chartable && list.id !== state.selected).length;
+    if (hidden) parts.push(`${plural(hidden, "session")} without tasks or agents hidden.`);
   }
-  const recent = state.lists.filter(list => list.recent);
-  const older = state.lists.filter(list => !list.recent);
-  for (const list of [...recent, ...(state.showOlder ? older : [])]) {
-    const identity = list.id === state.selected && state.model ? state.model : list;
-    const title = identity.title || list.id;
-    const updated = timestamp(list.updatedAt);
-    const date = updated === null ? "Unknown date" : new Date(updated).toLocaleDateString();
-    const option = node("option", "", list.recent ? title : `${title} · ${date}`);
-    option.value = list.id;
-    option.title = `${title}${identity.project ? ` · ${identity.project}` : ""}`;
-    elements.session.append(option);
+  return parts.join(" ") || `${plural(matching, "session")}.`;
+}
+
+function renderOptions() {
+  const matching = pickerSessions();
+  const shown = matching.slice(0, MAX_LISTED_SESSIONS);
+  state.pickerShown = shown.map(list => list.id);
+  if (!state.pickerShown.includes(state.pickerActive)) {
+    state.pickerActive = state.pickerShown.includes(state.selected) ? state.selected : state.pickerShown[0] ?? null;
   }
-  if (older.length && !state.showOlder) {
-    const reveal = node("option", "", "Show older sessions");
-    reveal.value = "";
-    reveal.dataset.action = "show-older";
-    elements.session.append(reveal);
+  const now = Date.now();
+  elements["session-options"].replaceChildren(...shown.map(list => sessionOption(list, now)));
+  if (!shown.length) {
+    const empty = node("li", "session-empty", "No matching sessions");
+    empty.setAttribute("role", "presentation");
+    elements["session-options"].append(empty);
   }
-  if (state.lists.some(list => list.id === state.selected)) elements.session.value = state.selected;
-  else elements.session.selectedIndex = 0;
+  elements["session-summary"].textContent = pickerSummary(matching.length, shown.length);
+  renderActiveOption(false);
+}
+
+function renderActiveOption(reveal) {
+  for (const option of elements["session-options"].querySelectorAll("[role=option]")) {
+    option.classList.toggle("active", option.dataset.id === state.pickerActive);
+  }
+  const active = state.pickerActive === null ? null : document.getElementById(optionId(state.pickerActive));
+  if (active) {
+    elements["session-filter"].setAttribute("aria-activedescendant", active.id);
+    if (reveal) active.scrollIntoView({ block: "nearest" });
+  } else {
+    elements["session-filter"].removeAttribute("aria-activedescendant");
+  }
+}
+
+function pickerOpen() {
+  return !elements["session-panel"].hidden;
+}
+
+function openPicker() {
+  if (elements.session.disabled) return;
+  elements["session-panel"].hidden = false;
+  elements.session.setAttribute("aria-expanded", "true");
+  state.pickerActive = state.selected;
+  elements["session-filter"].value = "";
+  renderOptions();
+  renderActiveOption(true);
+  elements["session-filter"].focus();
+}
+
+function closePicker(returnFocus) {
+  if (!pickerOpen()) return;
+  elements["session-panel"].hidden = true;
+  elements.session.setAttribute("aria-expanded", "false");
+  if (returnFocus) elements.session.focus();
+}
+
+function chooseSession(id) {
+  closePicker(true);
+  if (id && id !== state.selected) selectSession(id);
+}
+
+function moveActiveOption(step) {
+  if (!state.pickerShown.length) return;
+  const index = state.pickerShown.indexOf(state.pickerActive);
+  const next = index < 0 ? 0 : Math.max(0, Math.min(state.pickerShown.length - 1, index + step));
+  state.pickerActive = state.pickerShown[next];
+  renderActiveOption(true);
+}
+
+function renderLists(lists) {
+  state.lists = Array.isArray(lists) ? lists : [];
+  renderPicker();
+  if (pickerOpen()) renderOptions();
+}
+
+function linkedSession() {
+  if (!location.hash.startsWith(SESSION_HASH_PREFIX)) return null;
+  try {
+    return decodeURIComponent(location.hash.slice(SESSION_HASH_PREFIX.length));
+  } catch {
+    return null;
+  }
+}
+
+function linkSession(id) {
+  const address = id === null ? `${location.pathname}${location.search}` : `${SESSION_HASH_PREFIX}${encodeURIComponent(id)}`;
+  if (linkedSession() !== id) history.replaceState(null, "", address);
 }
 
 function closeStream() {
@@ -199,6 +340,7 @@ function parseEvent(event, receive) {
 function selectSession(id) {
   closeStream();
   state.selected = id;
+  linkSession(id);
   state.model = null;
   state.connected = false;
   state.lastReceived = null;
@@ -211,6 +353,8 @@ function selectSession(id) {
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
   elements.project.textContent = state.lists.find(list => list.id === id)?.project || "Claude Code sessions";
+  renderPicker();
+  if (pickerOpen()) renderOptions();
   renderFollow();
   renderConnection();
   setNotice("Reading session…");
@@ -220,7 +364,6 @@ function selectSession(id) {
     if (state.stream !== stream) return;
     parseEvent(event, model => {
       state.model = model;
-      if (!state.lists.find(list => list.id === id)?.recent) state.showOlder = true;
       renderLists(state.lists);
       renderModel();
     });
@@ -234,13 +377,16 @@ function selectSession(id) {
   stream.addEventListener("missing", () => {
     if (state.stream !== stream) return;
     renderLists(state.lists.filter(list => list.id !== id));
-    if (state.lists.length) {
-      selectSession(state.lists[0].id);
+    const next = state.lists.find(list => list.chartable);
+    if (next) {
+      selectSession(next.id);
       return;
     }
     closeStream();
     state.model = null;
     state.selected = null;
+    linkSession(null);
+    renderPicker();
     state.connected = false;
     state.detailPinned = false;
     elements.details.hidden = true;
@@ -250,7 +396,7 @@ function selectSession(id) {
     elements["task-count"].textContent = "";
     elements.warnings.hidden = true;
     renderConnection();
-    setNotice("This session is no longer available. No recent sessions remain.");
+    setNotice("This session is no longer available, and no other session has tasks or agents. Choose All sessions in the session picker to open another.");
   });
   stream.onopen = () => {
     if (state.stream === stream) markReceived();
@@ -760,17 +906,67 @@ function renderModel() {
 function tick() {
   const now = Date.now();
   renderConnection();
+  renderPicker();
   if (!state.model) return;
   if (state.follow && now - state.lastRebase >= FOLLOW_REBASE_INTERVAL) renderTimeline(now, true);
   else paintTimeline(now);
   paintMilestones(now);
 }
 
-elements.session.addEventListener("change", () => {
-  if (elements.session.selectedOptions[0]?.dataset.action === "show-older") {
-    state.showOlder = true;
-    renderLists(state.lists);
-  } else if (elements.session.value) selectSession(elements.session.value);
+elements.session.addEventListener("click", () => {
+  if (pickerOpen()) closePicker(true);
+  else openPicker();
+});
+elements["session-filter"].addEventListener("input", () => {
+  renderOptions();
+  renderActiveOption(true);
+});
+elements["session-filter"].addEventListener("keydown", event => {
+  const steps = { ArrowDown: 1, ArrowUp: -1, PageDown: OPTION_PAGE_STEP, PageUp: -OPTION_PAGE_STEP };
+  if (Object.hasOwn(steps, event.key)) {
+    event.preventDefault();
+    moveActiveOption(steps[event.key]);
+  } else if (event.key === "Enter" && state.pickerActive !== null) {
+    event.preventDefault();
+    chooseSession(state.pickerActive);
+  }
+});
+elements["session-all"].addEventListener("change", () => {
+  state.pickerAll = elements["session-all"].checked;
+  renderOptions();
+});
+elements["session-options"].addEventListener("mousedown", event => event.preventDefault());
+elements["session-options"].addEventListener("click", event => {
+  const option = event.target.closest("[role=option]");
+  if (option) chooseSession(option.dataset.id);
+});
+elements["session-options"].addEventListener("mousemove", event => {
+  const option = event.target.closest("[role=option]");
+  if (option && option.dataset.id !== state.pickerActive) {
+    state.pickerActive = option.dataset.id;
+    renderActiveOption(false);
+  }
+});
+elements["session-control"].addEventListener("keydown", event => {
+  if (event.key === "Escape" && pickerOpen()) {
+    event.preventDefault();
+    event.stopPropagation();
+    closePicker(true);
+  }
+});
+elements["session-control"].addEventListener("focusout", event => {
+  if (!elements["session-control"].contains(event.relatedTarget)) closePicker(false);
+});
+document.addEventListener("keydown", event => {
+  const typing = event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]");
+  if (event.key === "/" && !typing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    openPicker();
+  }
+});
+window.addEventListener("hashchange", () => {
+  const id = linkedSession();
+  if (id && id !== state.selected && state.lists.some(list => list.id === id)) selectSession(id);
 });
 elements.follow.addEventListener("click", () => {
   state.follow = !state.follow;
@@ -826,9 +1022,10 @@ async function start() {
     if (!response.ok) throw new Error("Session discovery failed");
     const result = await response.json();
     renderLists(result.lists);
-    const firstRecent = state.lists.find(list => list.recent);
-    if (firstRecent) selectSession(firstRecent.id);
-    else if (state.lists.length) setNotice("Choose Show older sessions to browse earlier work.");
+    const linked = linkedSession();
+    const first = state.lists.find(list => list.id === linked) || state.lists.find(list => list.chartable);
+    if (first) selectSession(first.id);
+    else if (state.lists.length) setNotice("No session has tasks or agents yet. Choose All sessions in the session picker to open another.");
     else setNotice("No sessions found. Start a Claude Code session with tasks, then refresh this page.");
   } catch {
     setNotice("Cannot reach the local server. Retrying…");

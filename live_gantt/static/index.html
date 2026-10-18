@@ -16,9 +16,22 @@
           <h1>Live Gantt</h1>
           <p id="project" class="project">Claude Code sessions</p>
         </div>
-        <div class="session-control">
-          <label for="session">Session</label>
-          <select id="session" aria-label="Choose a session"><option>Loading sessions…</option></select>
+        <div id="session-control" class="session-control">
+          <button id="session" class="session-button" type="button" aria-haspopup="listbox" aria-expanded="false"
+                  aria-controls="session-panel" aria-keyshortcuts="/" title="Switch session (/)">
+            <span id="session-title" class="session-title">Loading sessions…</span>
+            <span id="session-meta" class="session-meta"></span>
+          </button>
+          <div id="session-panel" class="session-panel" hidden>
+            <div class="session-search">
+              <input id="session-filter" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true"
+                     aria-controls="session-options" aria-label="Filter sessions by title, prompt or project"
+                     placeholder="Filter by title, prompt or project" autocomplete="off" spellcheck="false">
+              <label class="session-scope"><input id="session-all" type="checkbox"> All sessions</label>
+            </div>
+            <ul id="session-options" class="session-options" role="listbox" aria-label="Sessions"></ul>
+            <p id="session-summary" class="session-summary"></p>
+          </div>
         </div>
         <div id="connection" class="connection disconnected" role="status" aria-live="polite">
           <span class="connection-dot" aria-hidden="true"></span>
