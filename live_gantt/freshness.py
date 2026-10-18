@@ -93,11 +93,15 @@ def _task_findings(task: dict, session_active: bool, now: datetime) -> list[dict
     return findings
 
 
+def session_active(transcript_updated: datetime | None, now: datetime) -> bool:
+    """Whether a session is active: its parent transcript changed within ``ACTIVE_SESSION_MINUTES``, inclusive."""
+    return transcript_updated is not None and now - transcript_updated <= timedelta(minutes=ACTIVE_SESSION_MINUTES)
+
+
 def assess(tasks: list[dict], transcript_updated: datetime | None, now: datetime) -> dict:
     """Judge a session's plan at ``now``.
 
-    ``transcript_updated`` is the parent transcript's last change; the session is active
-    when it changed within ``ACTIVE_SESSION_MINUTES``, inclusive. Unreadable task files,
+    ``transcript_updated`` is the parent transcript's last change, judged by ``session_active``. Unreadable task files,
     completed and deleted tasks produce no findings. A run that has not ended is stale when
     its log is missing, when its log has not changed for ``SILENT_RUN_MINUTES`` while the
     session is active, or when its declared process has exited and its log, if any, shows
@@ -106,15 +110,14 @@ def assess(tasks: list[dict], transcript_updated: datetime | None, now: datetime
     JSON-ready: ``{stale, findings: [{rule, taskId, message}], sinceChangeSeconds,
     sessionActive}``; run findings add ``observed``, a short phrase for what was seen.
     """
-    session_active = (transcript_updated is not None
-                      and now - transcript_updated <= timedelta(minutes=ACTIVE_SESSION_MINUTES))
+    active = session_active(transcript_updated, now)
     readable = [task for task in tasks if task["readable"]]
     findings = [
         finding
         for task in readable if task["status"] not in FINISHED_STATUSES
-        for finding in _task_findings(task, session_active, now)
+        for finding in _task_findings(task, active, now)
     ]
     changes = [moment for moment in (_time(task["updatedAt"]) for task in readable) if moment]
     since_change = int((now - max(changes)).total_seconds()) if changes else None
     return {"stale": bool(findings), "findings": findings,
-            "sinceChangeSeconds": since_change, "sessionActive": session_active}
+            "sinceChangeSeconds": since_change, "sessionActive": active}

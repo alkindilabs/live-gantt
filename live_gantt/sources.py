@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .freshness import session_active
+
 
 UTC = timezone.utc
 SILENT_AFTER = timedelta(minutes=30)
@@ -33,8 +35,11 @@ RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
 TITLE_RECORD_TOKEN = b'"custom-title"'
 TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"', TITLE_RECORD_TOKEN)
 CWD_PATTERN = re.compile(rb'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")')
+ENTRYPOINT_PATTERN = re.compile(rb'"entrypoint"\s*:\s*("(?:[^"\\]|\\.)*")')
+HEADLESS_ENTRYPOINT = "sdk-cli"
 LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 LEADING_WRAPPER = re.compile(r"\s*<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1\s*>", re.DOTALL)
+LONE_TAG_LINE = re.compile(r"\s*</?[A-Za-z][\w-]*(?:\s[^>]*)?/?>\s*\Z")
 ELLIPSIS = "\u2026"
 
 
@@ -142,10 +147,11 @@ def _texts(content: Any) -> list[str]:
 
 
 def _prompt_title(text: str) -> str:
-    """Return the first line a person typed, after any markup elements the harness put before it."""
+    """Return the first line a person typed, after markup elements the harness put before it and lines holding only a tag."""
     while wrapper := LEADING_WRAPPER.match(text):
         text = text[wrapper.end():]
-    line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    line = next((line.strip() for line in text.splitlines()
+                 if line.strip() and not LONE_TAG_LINE.match(line)), "")
     if len(line) <= PROMPT_TITLE_CHARACTERS:
         return line
     return line[:PROMPT_TITLE_CHARACTERS - len(ELLIPSIS)] + ELLIPSIS
@@ -166,11 +172,14 @@ class _Naming:
     prompt: str = ""
     custom_title: str = ""
     project: str = ""
+    entrypoint: str = ""
 
     def read(self, line: bytes) -> None:
         cwd = CWD_PATTERN.search(line)
         if cwd and (project := _json_string(cwd.group(1))):
             self.project = project
+        if not self.entrypoint and (entrypoint := ENTRYPOINT_PATTERN.search(line)):
+            self.entrypoint = _json_string(entrypoint.group(1)) or ""
         if TITLE_RECORD_TOKEN not in line and (self.prompt or b'"user"' not in line):
             return
         try:
@@ -191,7 +200,20 @@ class _Naming:
     def followed_by(self, later: _Naming) -> _Naming:
         """Combine an earlier reading with a later one: first prompt, latest title and directory."""
         return _Naming(self.prompt or later.prompt, later.custom_title or self.custom_title,
-                       later.project or self.project)
+                       later.project or self.project, self.entrypoint or later.entrypoint)
+
+
+def _agents_directory(transcript: Path) -> Path:
+    return transcript.with_suffix("") / "subagents"
+
+
+def _agent_ids(directory: Path) -> set[str]:
+    agent_ids: set[str] = set()
+    for path in _children(directory):
+        if path.name.startswith("agent-") and path.name.endswith((".jsonl", ".meta.json")):
+            suffix = ".meta.json" if path.name.endswith(".meta.json") else ".jsonl"
+            agent_ids.add(path.name[len("agent-"):-len(suffix)])
+    return agent_ids
 
 
 def _line_is_complete(line: bytes, tokens: tuple[bytes, ...]) -> bool:
@@ -345,6 +367,8 @@ class _Session:
     id: str
     task_dir: Path | None = None
     transcript: Path | None = None
+    transcript_modified: float = 0
+    task_count: int = 0
     modified: float = 0
 
 
@@ -366,16 +390,11 @@ class SourceStore:
         self.root = Path(self.root).expanduser()
 
     def lists(self) -> list[dict[str, Any]]:
-        """List sessions by latest source change, reading identities only for recent sessions."""
+        """List sessions by latest source change, reading identities only for recent or chartable sessions."""
         with self._lock:
             sessions = sorted(self._sessions().values(), key=lambda session: (-session.modified, session.id))
-            cutoff = (datetime.now(UTC) - RECENT_SESSION_WINDOW).timestamp()
-            listings = []
-            for session in sessions:
-                recent = session.modified >= cutoff
-                listing = self._listing(session, [], read_identity=recent)
-                listings.append({**listing, "recent": recent})
-            return listings
+            now = datetime.now(UTC)
+            return [self._listing(session, now, []) for session in sessions]
 
     def plan(self, list_id: str) -> list[dict[str, Any]]:
         """Return a session's normalized tasks from its task files alone, without transcript history.
@@ -395,7 +414,7 @@ class SourceStore:
                 return None
             warnings: list[str] = []
             transcript = self._transcript(session.transcript) if session.transcript else _Transcript()
-            listing = self._listing(session, warnings)
+            listing = self._listing(session, now, warnings, read_identity=True)
             tasks = [self._task(path, transcript) for path in self._task_paths(session.task_dir)]
             agents = self._agents(session, transcript, now, warnings)
             assigned: set[str] = set()
@@ -414,7 +433,9 @@ class SourceStore:
                 continue
             session = sessions.setdefault(task_dir.name, _Session(task_dir.name))
             session.task_dir = task_dir
-            for path in self._task_paths(task_dir):
+            task_paths = self._task_paths(task_dir)
+            session.task_count = len(task_paths)
+            for path in task_paths:
                 file_stat = _stat(path)
                 if file_stat:
                     session.modified = max(session.modified, file_stat.st_mtime)
@@ -429,6 +450,7 @@ class SourceStore:
                 previous_stat = _stat(session.transcript) if session.transcript else None
                 if previous_stat is None or file_stat.st_mtime >= previous_stat.st_mtime:
                     session.transcript = path
+                    session.transcript_modified = file_stat.st_mtime
                 session.modified = max(session.modified, file_stat.st_mtime)
         return sessions
 
@@ -436,7 +458,13 @@ class SourceStore:
         paths = [path for path in _children(task_dir) if path.suffix == ".json" and _regular_stat(path)] if task_dir else []
         return sorted(paths, key=lambda path: path.name)
 
-    def _listing(self, session: _Session, warnings: list[str], *, read_identity: bool = True) -> dict[str, Any]:
+    def _listing(self, session: _Session, now: datetime, warnings: list[str], *,
+                 read_identity: bool | None = None) -> dict[str, Any]:
+        recent = session.modified >= (now - RECENT_SESSION_WINDOW).timestamp()
+        agent_count = len(_agent_ids(_agents_directory(session.transcript))) if session.transcript else 0
+        chartable = bool(session.task_count or agent_count)
+        if read_identity is None:
+            read_identity = recent or chartable
         identity = self._identity(session.transcript) if read_identity and session.transcript else None
         naming = identity.naming if identity else _Naming()
         title = naming.custom_title or naming.prompt
@@ -447,8 +475,14 @@ class SourceStore:
                 if isinstance(custom_title, str) and custom_title.strip():
                     title = custom_title.strip()
         updated = datetime.fromtimestamp(session.modified, UTC) if session.modified else None
-        return {"id": session.id, "title": title or session.id,
-                "project": naming.project, "updatedAt": _iso(updated)}
+        transcript_updated = (datetime.fromtimestamp(session.transcript_modified, UTC)
+                              if session.transcript else None)
+        title = title or session.id
+        return {"id": session.id, "title": title, "prompt": "" if naming.prompt == title else naming.prompt,
+                "project": naming.project, "updatedAt": _iso(updated), "recent": recent,
+                "live": session_active(transcript_updated, now), "chartable": chartable,
+                "taskCount": session.task_count, "agentCount": agent_count,
+                "headless": naming.entrypoint == HEADLESS_ENTRYPOINT}
 
     def _identity(self, path: Path) -> _Identity | None:
         file_stat = _regular_stat(path)
@@ -686,12 +720,8 @@ class SourceStore:
     def _agents(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> dict[str, dict[str, Any]]:
         if session.transcript is None:
             return {}
-        directory = session.transcript.with_suffix("") / "subagents"
-        agent_ids: set[str] = set()
-        for path in _children(directory):
-            if path.name.startswith("agent-") and path.name.endswith((".jsonl", ".meta.json")):
-                suffix = ".meta.json" if path.name.endswith(".meta.json") else ".jsonl"
-                agent_ids.add(path.name[len("agent-"):-len(suffix)])
+        directory = _agents_directory(session.transcript)
+        agent_ids = _agent_ids(directory)
         notifications: dict[str, tuple[str, datetime]] = {}
         for task_id, notification in parent.notifications.items():
             notifications[parent.agent_aliases.get(task_id, task_id)] = notification

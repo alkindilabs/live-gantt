@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from live_gantt.freshness import ACTIVE_SESSION_MINUTES
 from live_gantt.sources import IDENTITY_SCAN_LINES, IDENTITY_TAIL_BYTES, PROMPT_TITLE_CHARACTERS, SourceStore
 
 
@@ -277,8 +278,9 @@ class SourceStoreTests(unittest.TestCase):
             listing = self.store.lists()[0]
         self.assertNotIn(self.transcript, opened)
         self.assertNotIn(custom_title, opened)
-        self.assertEqual(listing, {"id": self.list_id, "title": self.list_id, "project": "",
-                                   "updatedAt": "2026-09-30T12:00:00Z", "recent": False})
+        self.assertEqual(listing, {"id": self.list_id, "title": self.list_id, "prompt": "", "project": "",
+                                   "updatedAt": "2026-09-30T12:00:00Z", "recent": False, "live": False,
+                                   "chartable": False, "taskCount": 0, "agentCount": 0, "headless": False})
 
     def test_selecting_old_session_reads_its_identity_lazily(self):
         self.append({"type": "user", "cwd": "/old/project", "message": {"content": "Old prompt"}})
@@ -383,6 +385,11 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(len(title), PROMPT_TITLE_CHARACTERS)
         self.assertTrue(title.startswith("word word"))
         self.assertTrue(title.endswith("…"))
+        unclosed = self.project_dir / "pasted-session.jsonl"
+        self.append({"type": "user", "message": {"content": "<pasted_content id=\"2\">\n<b>\nTraceback line\nMore"}},
+                    path=unclosed)
+        title = next(item["title"] for item in self.store.lists() if item["id"] == "pasted-session")
+        self.assertEqual(title, "Traceback line")
 
     def test_identity_follows_the_latest_title_record_and_working_directory(self):
         self.append({"type": "user", "cwd": "/old/place", "message": {"content": "First prompt"}},
@@ -398,6 +405,51 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual((state["title"], state["project"]), ("Renamed", "/new/place"))
         self.append({"type": "custom-title", "customTitle": "Renamed again", "sessionId": self.list_id})
         self.assertEqual(self.store.lists()[0]["title"], "Renamed again")
+
+    def test_index_says_which_sessions_can_draw_a_chart_and_which_are_live(self):
+        self.task("1")
+        self.task("2")
+        self.append({"type": "user", "entrypoint": "cli", "cwd": "/work", "message": {"content": "Plan the release"}},
+                    {"type": "custom-title", "customTitle": "release.1015-0900.abcd"})
+        agents_session = self.project_dir / "agents-session.jsonl"
+        self.append({"type": "user", "entrypoint": "cli", "message": {"content": "Delegate"}}, path=agents_session)
+        agents_dir = agents_session.with_suffix("") / "subagents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "agent-a1.jsonl").write_text("")
+        (agents_dir / "agent-a1.meta.json").write_text("{}")
+        gate = self.project_dir / "gate-run.jsonl"
+        self.append({"type": "user", "entrypoint": "sdk-cli", "message": {"content": "Judge the staged diff"}}, path=gate)
+        old_plan = self.root / "tasks" / "old-plan"
+        old_plan.mkdir()
+        (old_plan / "1.json").write_text(json.dumps({"id": "1", "subject": "Old work", "status": "completed"}))
+        old_transcript = self.project_dir / "old-plan.jsonl"
+        self.append({"type": "user", "cwd": "/old/work", "message": {"content": "Old plan"}}, path=old_transcript)
+        recently = (self.now - timedelta(minutes=ACTIVE_SESSION_MINUTES)).timestamp()
+        quiet = (self.now - timedelta(minutes=ACTIVE_SESSION_MINUTES + 1)).timestamp()
+        long_ago = (self.now - timedelta(days=30)).timestamp()
+        for path, moment in ((self.transcript, recently), (self.task_dir / "1.json", quiet), (self.task_dir / "2.json", quiet),
+                             (agents_session, quiet), (gate, recently), (old_transcript, long_ago),
+                             (old_plan / "1.json", long_ago)):
+            os.utime(path, (moment, moment))
+        with patch("live_gantt.sources.datetime", wraps=datetime) as clock:
+            clock.now.return_value = self.now
+            by_id = {listing["id"]: listing for listing in self.store.lists()}
+
+        def summary(list_id):
+            listing = by_id[list_id]
+            return {key: listing[key] for key in ("chartable", "taskCount", "agentCount", "headless", "live")}
+
+        self.assertEqual(summary(self.list_id), {"chartable": True, "taskCount": 2, "agentCount": 0,
+                                                 "headless": False, "live": True})
+        self.assertEqual(summary("agents-session"), {"chartable": True, "taskCount": 0, "agentCount": 1,
+                                                     "headless": False, "live": False})
+        self.assertEqual(summary("gate-run"), {"chartable": False, "taskCount": 0, "agentCount": 0,
+                                               "headless": True, "live": True})
+        self.assertEqual(by_id[self.list_id]["title"], "release.1015-0900.abcd")
+        self.assertEqual(by_id[self.list_id]["prompt"], "Plan the release")
+        self.assertEqual(by_id["agents-session"]["prompt"], "")
+        self.assertFalse(by_id["old-plan"]["recent"])
+        self.assertEqual((by_id["old-plan"]["title"], by_id["old-plan"]["project"]), ("Old plan", "/old/work"))
 
 
 if __name__ == "__main__":
