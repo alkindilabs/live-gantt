@@ -716,8 +716,13 @@ function agentEnd(item, now) {
   return timestamp(item.ended) ?? (LIVE_AGENT_STATUSES.has(item.status) ? now : timestamp(item.lastActivityAt));
 }
 
+function childBarLabel(item) {
+  if (item.status === "running") return item.activity || "Running";
+  return item.status === "completed" ? "Done" : titleCase(item.status);
+}
+
 function paintChild(track, item, now) {
-  createBar(track, agentClass(item), timestamp(item.started), agentEnd(item, now), item.activity, item.status === "running");
+  createBar(track, agentClass(item), timestamp(item.started), agentEnd(item, now), childBarLabel(item), item.status === "running");
 }
 
 function paintAttempts(track, attempts, now) {

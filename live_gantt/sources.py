@@ -311,7 +311,7 @@ class _Transcript:
                 inputs = item.get("input")
                 inputs = inputs if isinstance(inputs, dict) else {}
                 description = inputs.get("description")
-                self.activity = description if isinstance(description, str) and description else str(name or "")
+                self.activity = description if isinstance(description, str) else ""
                 if name == "TaskUpdate":
                     self._read_task_update(inputs, timestamp)
             elif item.get("type") == "tool_result":

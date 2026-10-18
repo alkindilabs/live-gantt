@@ -210,6 +210,12 @@ class SourceStoreTests(unittest.TestCase):
         self.append(self.hand_back("2026-10-15T11:50:00Z"), path=self.project_dir / self.list_id / "subagents" / "agent-resumed.jsonl")
         self.assertEqual(self.agents_by_id()["resumed"]["status"], "completed")
 
+    def test_agent_activity_is_the_latest_step_description_never_a_tool_name(self):
+        self.agent("worker",
+                   self.tool("2026-10-15T11:50:00Z", "Bash", {"command": "make", "description": "Build the chart"}),
+                   self.tool("2026-10-15T11:51:00Z", "Read", {"file_path": "/example/notes"}, "read"))
+        self.assertEqual(self.agents_by_id()["worker"]["activity"], "")
+
     def test_metadata_validation_live_journal_and_run_activity(self):
         journal = self.task_dir / "work.jsonl"
         journal.write_text('{"type":"result"}\n{"type": "result"}\n{"type":"other"}\n')
