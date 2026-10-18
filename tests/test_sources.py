@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from live_gantt.sources import PROMPT_TITLE_CHARACTERS, SourceStore
+from live_gantt.sources import IDENTITY_SCAN_LINES, IDENTITY_TAIL_BYTES, PROMPT_TITLE_CHARACTERS, SourceStore
 
 
 class SourceStoreTests(unittest.TestCase):
@@ -350,6 +350,9 @@ class SourceStoreTests(unittest.TestCase):
         for _ in range(150):
             self.append({"timestamp": "2026-10-15T10:00:00Z", "type": "assistant", "message": {"content": "setup"}})
         self.append({"timestamp": "2026-10-15T11:00:00Z", "type": "user", "cwd": "/late/project", "message": {"content": "Late first prompt\nBody"}})
+        filler = "x" * 1000
+        for _ in range(IDENTITY_TAIL_BYTES // len(filler) + 1):
+            self.append({"timestamp": "2026-10-15T11:30:00Z", "type": "assistant", "message": {"content": filler}})
         self.assertEqual(self.store.lists()[0]["title"], self.list_id)
         state = self.state()
         self.assertEqual(state["title"], "Late first prompt")
@@ -380,6 +383,21 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(len(title), PROMPT_TITLE_CHARACTERS)
         self.assertTrue(title.startswith("word word"))
         self.assertTrue(title.endswith("…"))
+
+    def test_identity_follows_the_latest_title_record_and_working_directory(self):
+        self.append({"type": "user", "cwd": "/old/place", "message": {"content": "First prompt"}},
+                    {"type": "custom-title", "customTitle": "Early name", "sessionId": self.list_id})
+        for _ in range(IDENTITY_SCAN_LINES):
+            self.append({"type": "assistant", "cwd": "/old/place", "message": {"content": "work"}})
+        self.assertEqual(self.store.lists()[0]["title"], "Early name")
+        self.append({"type": "custom-title", "customTitle": "Renamed", "sessionId": self.list_id},
+                    {"type": "assistant", "cwd": "/new/place", "message": {"content": "moved"}})
+        listing = self.store.lists()[0]
+        self.assertEqual((listing["title"], listing["project"]), ("Renamed", "/new/place"))
+        state = self.state()
+        self.assertEqual((state["title"], state["project"]), ("Renamed", "/new/place"))
+        self.append({"type": "custom-title", "customTitle": "Renamed again", "sessionId": self.list_id})
+        self.assertEqual(self.store.lists()[0]["title"], "Renamed again")
 
 
 if __name__ == "__main__":

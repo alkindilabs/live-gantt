@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ SILENT_AFTER = timedelta(minutes=30)
 RECENT_SESSION_WINDOW = timedelta(days=14)
 IDENTITY_SCAN_BYTES = 1024 * 1024
 IDENTITY_SCAN_LINES = 128
+IDENTITY_TAIL_BYTES = 256 * 1024
 PROMPT_TITLE_CHARACTERS = 120
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
 LIVE_AGENT_STATUSES = frozenset({"running", "in_progress", "pending"})
@@ -29,7 +30,9 @@ RESULT_LINE_PATTERN = re.compile(rb'"type"\s*:\s*"result"')
 AGENT_ID_PATTERN = re.compile(r'(?:agentId|agent_id)\s*[":=]+\s*["\s]*([\w-]+)')
 TASK_ID_PATTERN = re.compile(r'(?:task_id|taskId)\s*[":=]+\s*["\s]*([\w-]+)')
 RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
-TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"')
+TITLE_RECORD_TOKEN = b'"custom-title"'
+TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"', TITLE_RECORD_TOKEN)
+CWD_PATTERN = re.compile(rb'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")')
 LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 LEADING_WRAPPER = re.compile(r"\s*<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1\s*>", re.DOTALL)
 ELLIPSIS = "\u2026"
@@ -148,6 +151,49 @@ def _prompt_title(text: str) -> str:
     return line[:PROMPT_TITLE_CHARACTERS - len(ELLIPSIS)] + ELLIPSIS
 
 
+def _json_string(encoded: bytes) -> str | None:
+    try:
+        value = json.loads(encoded)
+    except (ValueError, UnicodeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+@dataclass
+class _Naming:
+    """What a transcript says about its session: the prompt title, latest custom title and latest working directory."""
+
+    prompt: str = ""
+    custom_title: str = ""
+    project: str = ""
+
+    def read(self, line: bytes) -> None:
+        cwd = CWD_PATTERN.search(line)
+        if cwd and (project := _json_string(cwd.group(1))):
+            self.project = project
+        if TITLE_RECORD_TOKEN not in line and (self.prompt or b'"user"' not in line):
+            return
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            return
+        if not isinstance(record, dict):
+            return
+        if record.get("type") == "custom-title":
+            custom_title = record.get("customTitle")
+            if isinstance(custom_title, str) and custom_title.strip():
+                self.custom_title = custom_title.strip()
+        elif not self.prompt and record.get("type") == "user" and record.get("isMeta") is not True:
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            self.prompt = next((title for text in _texts(content) if (title := _prompt_title(text))), "")
+
+    def followed_by(self, later: _Naming) -> _Naming:
+        """Combine an earlier reading with a later one: first prompt, latest title and directory."""
+        return _Naming(self.prompt or later.prompt, later.custom_title or self.custom_title,
+                       later.project or self.project)
+
+
 def _line_is_complete(line: bytes, tokens: tuple[bytes, ...]) -> bool:
     if line.endswith(b"\n"):
         return True
@@ -191,8 +237,7 @@ class _Transcript:
     first: datetime | None = None
     last: datetime | None = None
     activity: str = ""
-    title: str = ""
-    project: str = ""
+    naming: _Naming = field(default_factory=_Naming)
     histories: dict[str, _TaskHistory] = field(default_factory=dict)
     notifications: dict[str, tuple[str, datetime]] = field(default_factory=dict)
     agent_aliases: dict[str, str] = field(default_factory=dict)
@@ -203,19 +248,14 @@ class _Transcript:
         if timestamp:
             self.first = self.first or timestamp
             self.last = timestamp
-        needs_identity = not self.title or not self.project
-        relevant = any(token in line for token in RELEVANT_TOKENS)
-        identity_line = needs_identity and (b'"cwd"' in line or b'"user"' in line)
-        if not relevant and not identity_line:
+        self.naming.read(line)
+        if timestamp is None or not any(token in line for token in RELEVANT_TOKENS):
             return
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
             return
         if not isinstance(record, dict):
-            return
-        self._read_identity(record)
-        if timestamp is None:
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -243,16 +283,6 @@ class _Transcript:
                         history._record(timestamp, "created")
                     self._read_notifications(text, timestamp)
                     self._read_agent_alias(text)
-
-    def _read_identity(self, record: dict[str, Any]) -> None:
-        cwd = record.get("cwd")
-        if not self.project and isinstance(cwd, str):
-            self.project = cwd
-        if self.title or record.get("type") != "user" or record.get("isMeta") is True:
-            return
-        message = record.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        self.title = next((title for text in _texts(content) if (title := _prompt_title(text))), "")
 
     def _read_task_update(self, inputs: dict[str, Any], timestamp: datetime) -> None:
         task_id = _task_id(inputs.get("taskId"))
@@ -287,11 +317,18 @@ class _Transcript:
 
 @dataclass
 class _Identity:
+    """A transcript's naming, read from a bounded prefix and tail and cached until the file changes.
+
+    A final prefix cannot gain a prompt by growing: its prompt was found or its byte or line budget ran out.
+    """
+
     identity: tuple[int, int]
     size: int
     modified: int
-    title: str = ""
-    project: str = ""
+    prefix: _Naming
+    prefix_end: int
+    prefix_final: bool
+    naming: _Naming
 
 
 @dataclass
@@ -401,7 +438,8 @@ class SourceStore:
 
     def _listing(self, session: _Session, warnings: list[str], *, read_identity: bool = True) -> dict[str, Any]:
         identity = self._identity(session.transcript) if read_identity and session.transcript else None
-        title = identity.title if identity else ""
+        naming = identity.naming if identity else _Naming()
+        title = naming.custom_title or naming.prompt
         if read_identity and session.transcript:
             custom_title_path = session.transcript.with_suffix("") / "custom-title.json"
             if _stat(custom_title_path):
@@ -410,7 +448,7 @@ class SourceStore:
                     title = custom_title.strip()
         updated = datetime.fromtimestamp(session.modified, UTC) if session.modified else None
         return {"id": session.id, "title": title or session.id,
-                "project": identity.project if identity else "", "updatedAt": _iso(updated)}
+                "project": naming.project, "updatedAt": _iso(updated)}
 
     def _identity(self, path: Path) -> _Identity | None:
         file_stat = _regular_stat(path)
@@ -419,34 +457,44 @@ class SourceStore:
         identity = (file_stat.st_dev, file_stat.st_ino)
         cached = self._identities.get(path)
         same_file = cached and cached.identity == identity and file_stat.st_size >= cached.size
-        unchanged = same_file and cached.size == file_stat.st_size and cached.modified == file_stat.st_mtime_ns
-        known = same_file and cached.title and cached.project and file_stat.st_size > cached.size
-        if unchanged or known:
-            cached.size, cached.modified = file_stat.st_size, file_stat.st_mtime_ns
+        if same_file and cached.size == file_stat.st_size and cached.modified == file_stat.st_mtime_ns:
             return cached
-        parsed = _Transcript()
         try:
             with path.open("rb") as stream:
-                remaining = IDENTITY_SCAN_BYTES
-                for _ in range(IDENTITY_SCAN_LINES):
-                    line = stream.readline(remaining + 1)
-                    remaining -= len(line)
-                    if remaining < 0 or not line:
-                        break
-                    if b'"cwd"' in line or b'"user"' in line:
-                        try:
-                            record = json.loads(line)
-                        except (ValueError, UnicodeError):
-                            continue
-                        if isinstance(record, dict):
-                            parsed._read_identity(record)
-                    if parsed.title and parsed.project:
-                        break
+                if same_file and cached.prefix_final:
+                    prefix, prefix_end, prefix_final = cached.prefix, cached.prefix_end, True
+                else:
+                    prefix, prefix_end, prefix_final = self._read_prefix(stream)
+                tail = _Naming()
+                tail_start = max(prefix_end, file_stat.st_size - IDENTITY_TAIL_BYTES)
+                stream.seek(tail_start)
+                skipped_lines = tail_start > prefix_end
+                if skipped_lines:
+                    stream.readline()
+                for line in stream:
+                    tail.read(line)
         except OSError:
             return cached
-        cached = _Identity(identity, file_stat.st_size, file_stat.st_mtime_ns, parsed.title, parsed.project)
+        if skipped_lines:
+            tail.prompt = ""
+        cached = _Identity(identity, file_stat.st_size, file_stat.st_mtime_ns, prefix, prefix_end, prefix_final,
+                           prefix.followed_by(tail))
         self._identities[path] = cached
         return cached
+
+    def _read_prefix(self, stream: Any) -> tuple[_Naming, int, bool]:
+        prefix = _Naming()
+        remaining = IDENTITY_SCAN_BYTES
+        for _ in range(IDENTITY_SCAN_LINES):
+            line_start = stream.tell()
+            line = stream.readline(remaining + 1)
+            remaining -= len(line)
+            if remaining < 0 or not line:
+                return prefix, line_start, remaining < 0
+            prefix.read(line)
+            if prefix.prompt:
+                return prefix, stream.tell(), True
+        return prefix, stream.tell(), True
 
     def _transcript(self, path: Path) -> _Transcript:
         file_stat = _regular_stat(path)
@@ -471,7 +519,8 @@ class SourceStore:
         except OSError:
             return cached
         cached.size, cached.modified = file_stat.st_size, file_stat.st_mtime_ns
-        self._identities[path] = _Identity(identity, cached.size, cached.modified, cached.title, cached.project)
+        naming = replace(cached.naming)
+        self._identities[path] = _Identity(identity, cached.size, cached.modified, naming, cached.offset, True, naming)
         return cached
 
     def _task(self, path: Path, transcript: _Transcript) -> dict[str, Any]:
