@@ -35,14 +35,29 @@
         </div>
         <div id="connection" class="connection disconnected" role="status" aria-live="polite">
           <span class="connection-dot" aria-hidden="true"></span>
-          <span id="connection-text">Connecting</span>
+          <span id="connection-text">Connecting</span><span id="connection-age" aria-hidden="true"></span>
         </div>
       </header>
 
+      <section id="session-heading" class="session-heading" aria-labelledby="session-name" hidden>
+        <h2 id="session-name"></h2>
+        <p id="session-description"></p>
+      </section>
+      <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
+        <div class="overview-heading">
+          <div>
+            <h2 id="overview-title">Plan progress</h2>
+            <p id="task-count" class="task-count"></p>
+          </div>
+          <p id="forecast-health" class="forecast-health"></p>
+        </div>
+        <div id="milestones" class="milestones" aria-label="Milestone progress and finish estimates"></div>
+      </section>
       <section id="freshness" class="freshness-alert" role="alert" aria-label="Stale plan" hidden></section>
-      <section id="milestones" class="milestones" aria-label="Milestone progress"></section>
+      <div class="work-area">
       <section class="chart-shell" aria-label="Session work timeline">
         <div class="toolbar">
+          <div class="chart-heading"><h2>Work timeline</h2></div>
           <div class="zoom-controls" role="group" aria-label="Timeline zoom">
             <button type="button" data-zoom="12h" aria-pressed="false">12 h</button>
             <button type="button" data-zoom="3d" aria-pressed="false">3 days</button>
@@ -50,8 +65,9 @@
             <button type="button" data-zoom="fit" aria-pressed="false">Fit</button>
           </div>
           <button id="follow" class="follow" type="button" aria-pressed="true">Following now</button>
-          <span id="task-count" class="task-count"></span>
         </div>
+        <details class="legend-disclosure">
+        <summary>Status key</summary>
         <div class="legend" aria-label="Status legend">
           <span><i class="legend-swatch done" aria-hidden="true"></i>Done</span>
           <span><i class="legend-swatch running" aria-hidden="true"></i>Running</span>
@@ -61,17 +77,19 @@
           <span><i class="legend-swatch blocked" aria-hidden="true"></i>Blocked</span>
           <span><i class="legend-swatch silent" aria-hidden="true"></i>Silent</span>
         </div>
+        </details>
         <p id="notice" class="notice" role="status">Reading local sessions…</p>
         <div id="timeline" class="timeline" tabindex="0" aria-label="Timeline; scroll horizontally to explore time">
           <div id="timeline-content" class="timeline-content"></div>
         </div>
-        <p class="chart-help">Hover or focus a task for details. Times use your local timezone.</p>
+        <p class="chart-help">Select work to inspect its progress and history. Scroll the timeline to explore time.</p>
       </section>
-      <section id="warnings" class="source-warnings" aria-label="Source warnings" hidden></section>
       <aside id="details" class="details" aria-label="Work details" hidden>
-        <button id="close-details" class="close-details" type="button" aria-label="Close details">Close</button>
+        <div class="details-header"><span>Work details</span><button id="close-details" class="close-details" type="button" aria-label="Close details">Close</button></div>
         <div id="details-content"></div>
       </aside>
+      </div>
+      <section id="warnings" class="source-warnings" aria-label="Source warnings" hidden></section>
     </main>
   </body>
 </html>
