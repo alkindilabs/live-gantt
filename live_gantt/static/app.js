@@ -1,5 +1,6 @@
 "use strict";
 
+const PERCENT_SCALE = 100;
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
@@ -52,7 +53,7 @@ function savedExpanded() {
 }
 
 const elements = Object.fromEntries(
-  ["session", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "freshness", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
@@ -74,7 +75,7 @@ const state = {
   lastScrollLeft: 0,
   tracks: [],
   milestoneDates: [],
-  detailPinned: false,
+  detailsOpen: false,
   detailKey: null,
   detailEntries: new Map(),
   focusTargets: new Map(),
@@ -99,7 +100,7 @@ function number(value, fallback = 0) {
 }
 
 function percent(value) {
-  return `${Math.round(Math.max(0, Math.min(100, number(value))))}%`;
+  return `${Math.round(Math.max(0, Math.min(PERCENT_SCALE, number(value))))}%`;
 }
 
 function hours(value) {
@@ -119,6 +120,12 @@ function dateTime(value, full = false) {
   return new Intl.DateTimeFormat(undefined, full
     ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }
     : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(time);
+}
+
+function forecastTime(time, now) {
+  if (new Date(time).toDateString() !== new Date(now).toDateString()) return dateTime(time);
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(time);
+  return `Today, ${clock}`;
 }
 
 function titleCase(value) {
@@ -325,7 +332,10 @@ function renderConnection() {
   const age = state.lastReceived === null ? null : Math.max(0, Math.floor((Date.now() - state.lastReceived) / SECOND));
   const live = state.connected && age !== null && age * SECOND < CONNECTION_STALE_AFTER;
   elements.connection.classList.toggle("disconnected", !live);
-  elements["connection-text"].textContent = live ? `Live · ${age}s ago` : "Disconnected";
+  const label = live ? "Live" : "Disconnected";
+  if (elements["connection-text"].textContent !== label) elements["connection-text"].textContent = label;
+  elements["connection-age"].textContent = live ? `${age}s ago` : "";
+  renderForecastHealth(live);
 }
 
 function parseEvent(event, receive) {
@@ -345,14 +355,16 @@ function selectSession(id) {
   state.connected = false;
   state.lastReceived = null;
   state.follow = true;
-  state.detailPinned = false;
+  state.detailsOpen = false;
   elements.details.hidden = true;
   elements["timeline-content"].replaceChildren();
   elements.milestones.replaceChildren();
+  elements.overview.hidden = true;
   renderFreshness(null);
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
-  elements.project.textContent = state.lists.find(list => list.id === id)?.project || "Claude Code sessions";
+  elements.project.textContent = shortProject(state.lists.find(list => list.id === id)?.project) || "Claude Code sessions";
+  elements["session-heading"].hidden = true;
   renderPicker();
   if (pickerOpen()) renderOptions();
   renderFollow();
@@ -385,18 +397,25 @@ function selectSession(id) {
     closeStream();
     state.model = null;
     state.selected = null;
+    document.title = "Live Gantt";
+    elements.project.textContent = "Claude Code sessions";
+    elements.project.title = "";
     linkSession(null);
     renderPicker();
     state.connected = false;
-    state.detailPinned = false;
+    state.detailsOpen = false;
     elements.details.hidden = true;
     elements["timeline-content"].replaceChildren();
     elements.milestones.replaceChildren();
+    elements.overview.hidden = true;
+    elements["session-heading"].hidden = true;
     renderFreshness(null);
     elements["task-count"].textContent = "";
     elements.warnings.hidden = true;
     renderConnection();
-    setNotice("This session is no longer available, and no other session has tasks or agents. Choose All sessions in the session picker to open another.");
+    setNotice(state.lists.length
+      ? "This session is no longer available. Choose All sessions in the session picker to open another."
+      : "This session is no longer available. Start a session with tasks, then refresh this page.");
   });
   stream.onopen = () => {
     if (state.stream === stream) markReceived();
@@ -412,16 +431,18 @@ function selectSession(id) {
 
 function fitRange(now) {
   const times = [now - MINIMUM_FIT_SPAN * PAST_SHARE, now + MINIMUM_FIT_SPAN * (1 - PAST_SHARE)];
+  const activities = [...(state.model?.agents || []), ...(state.model?.workflows || [])];
   for (const task of state.model?.tasks || []) {
     for (const value of [timestamp(task.started), timestamp(task.ended), projectedTime(task.projectedStart, now), projectedTime(task.projectedEnd, now)]) {
       if (value !== null) times.push(value);
     }
-    for (const child of [...(task.agents || []), ...(task.runs || [])]) {
-      const start = timestamp(child.started);
-      const end = timestamp(child.ended);
-      if (start !== null) times.push(start);
-      if (end !== null) times.push(end);
-    }
+    activities.push(...(task.agents || []), ...(task.runs || []));
+  }
+  for (const activity of activities) {
+    const start = timestamp(activity.started);
+    const end = agentEnd(activity, now);
+    if (start !== null) times.push(start);
+    if (end !== null) times.push(end);
   }
   const start = Math.min(...times);
   const end = Math.max(...times);
@@ -497,11 +518,15 @@ function detailField(list, name, value) {
   list.append(node("dt", "", name), node("dd", "", value));
 }
 
-function showDetails(item, kind, pinned = false, key = null) {
-  if (state.detailPinned && !pinned) return;
-  state.detailPinned = pinned;
-  state.detailKey = key;
+function showDetails(item, kind, key) {
   const content = elements["details-content"];
+  const sameSelection = state.detailsOpen && state.detailKey === key;
+  const previousMetadata = sameSelection ? content.querySelector(".task-metadata") : null;
+  const metadataOpen = previousMetadata?.open || false;
+  const metadataFocused = previousMetadata?.contains(document.activeElement) || false;
+  const previousScroll = sameSelection ? elements.details.scrollTop : 0;
+  state.detailsOpen = true;
+  state.detailKey = key;
   content.replaceChildren();
   const heading = item.subject || item.label || item.name || item.description || `Agent ${item.id}`;
   content.append(node("h2", "", heading));
@@ -513,8 +538,9 @@ function showDetails(item, kind, pinned = false, key = null) {
   detailField(fields, "Lane", item.lane);
   detailField(fields, "Milestone", item.milestone);
   detailField(fields, "Progress", kind === "task" ? percent(item.effectiveProgress ?? item.progress) : undefined);
-  detailField(fields, "Weight", item.weight);
-  detailField(fields, "Created", item.created ? dateTime(item.created, true) : undefined);
+  const expectedFinish = kind === "task" ? projectedTime(item.projectedEnd, Date.now()) : null;
+  detailField(fields, "Expected finish", expectedFinish !== null ? dateTime(expectedFinish) : undefined);
+  detailField(fields, "Last update", item.updatedAt ? dateTime(item.updatedAt, true) : undefined);
   detailField(fields, "Started", item.started ? dateTime(item.started, true) : undefined);
   detailField(fields, "Ended", item.ended ? dateTime(item.ended, true) : undefined);
   detailField(fields, "Workflow", item.workflow);
@@ -525,9 +551,7 @@ function showDetails(item, kind, pinned = false, key = null) {
   detailField(fields, "Activity", item.activity);
   detailField(fields, "Log", item.log);
   if (item.estimate) {
-    detailField(fields, "Estimate", `${hours(item.estimate.low)} low · ${hours(item.estimate.likely)} likely · ${hours(item.estimate.high)} high`);
-    detailField(fields, "Mean", hours(item.estimateMean));
-    detailField(fields, "Deviation", hours(item.estimateSd));
+    detailField(fields, "Task estimate", `${hours(item.estimate.likely)} likely (${hours(item.estimate.low)}–${hours(item.estimate.high)})`);
   }
   content.append(fields);
   for (const warning of [...(item.warnings || []), ...(item.markers || [])]) content.append(node("p", "detail-warning", warning));
@@ -538,9 +562,17 @@ function showDetails(item, kind, pinned = false, key = null) {
     content.append(history);
   }
   if (item.metadata && Object.keys(item.metadata).length) {
-    content.append(node("h3", "", "Metadata"), node("pre", "", JSON.stringify(item.metadata, null, 2)));
+    const metadata = node("details", "task-metadata");
+    metadata.open = metadataOpen;
+    metadata.append(node("summary", "", "Task metadata"), node("pre", "", JSON.stringify(item.metadata, null, 2)));
+    content.append(metadata);
+    if (metadataFocused) metadata.querySelector("summary").focus({ preventScroll: true });
   }
   elements.details.hidden = false;
+  elements.details.scrollTop = previousScroll;
+  for (const [entryKey, entry] of state.detailEntries) {
+    entry.target.setAttribute("aria-expanded", String(entryKey === key));
+  }
 }
 
 function registerFocus(target, key) {
@@ -554,18 +586,25 @@ function toggleExpanded(key) {
   renderTimeline(Date.now());
 }
 
+function closeDetails(restoreFocus = true) {
+  const key = state.detailKey;
+  state.detailsOpen = false;
+  state.detailKey = null;
+  elements.details.hidden = true;
+  if (state.model) renderTimeline(Date.now(), state.follow);
+  if (restoreFocus) state.focusTargets.get(key)?.focus();
+}
+
 function attachDetails(target, item, kind, key) {
   registerFocus(target, key);
   state.detailEntries.set(key, { target, item, kind });
-  target.addEventListener("mouseenter", () => showDetails(item, kind, false, key));
-  target.addEventListener("mouseleave", () => {
-    if (!state.detailPinned && !target.contains(document.activeElement)) elements.details.hidden = true;
+  target.setAttribute("aria-controls", "details");
+  target.setAttribute("aria-expanded", String(state.detailsOpen && state.detailKey === key));
+  target.addEventListener("click", () => {
+    showDetails(item, kind, key);
+    renderTimeline(Date.now(), state.follow);
+    elements["close-details"].focus();
   });
-  target.addEventListener("focus", () => showDetails(item, kind, false, key));
-  target.addEventListener("blur", event => {
-    if (!state.detailPinned && !elements.details.contains(event.relatedTarget)) elements.details.hidden = true;
-  });
-  target.addEventListener("click", () => showDetails(item, kind, true, key));
 }
 
 function isOverrun(task, now) {
@@ -607,7 +646,8 @@ function renderTask(task) {
   main.type = "button";
   const title = node("span", "task-title");
   title.append(node("span", "task-id", `#${task.id} `), document.createTextNode(task.subject || "Untitled task"));
-  main.append(title);
+  const meta = node("span", "task-meta", taskSubtitle(task));
+  main.append(title, meta);
   main.title = taskSubtitle(task);
   main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskSubtitle(task)}. Show details.`);
   attachDetails(main, task, "task", `task:${task.id}`);
@@ -618,7 +658,7 @@ function renderTask(task) {
     label.append(foldBadge(`${count} ${noun}`, `finished agent ${noun} on task ${task.id}`, attemptsKey, attemptsShown));
   }
   const track = makeTrack();
-  state.tracks.push({ track, item: task, kind: "task", main, finished });
+  state.tracks.push({ track, item: task, kind: "task", main, meta, finished });
   makeRow(label, track);
   for (const agent of task.agents || []) {
     if (LIVE_AGENT_STATUSES.has(agent.status) || attemptsShown) renderChild(agent, "agent", `task:${task.id}:agent:${agent.id}`);
@@ -762,12 +802,13 @@ function paintAttempts(track, attempts, now) {
 
 function paintTimeline(now) {
   if (!state.range) return;
-  for (const { track, item, kind, main, finished } of state.tracks) {
+  for (const { track, item, kind, main, meta, finished } of state.tracks) {
     for (const old of track.querySelectorAll(".bar, .bar-label, .row-marker")) old.remove();
     if (kind === "task") {
       paintTask(track, item, now);
       paintAttempts(track, finished, now);
       main.title = taskSubtitle(item, now);
+      meta.textContent = main.title;
     } else if (kind === "summary") createBar(track, "done summary-bar", timestamp(item.started), timestamp(item.ended));
     else if (kind === "workflow") {
       paintChild(track, item, now);
@@ -780,39 +821,74 @@ function paintTimeline(now) {
   }
 }
 
+function renderForecastHealth(live) {
+  const stale = state.model?.freshness?.stale;
+  const changed = state.model?.freshness?.sinceChangeSeconds;
+  const age = changed === null || changed === undefined ? null : changed * SECOND + modelAge(Date.now());
+  const message = !state.model ? "" : !live
+    ? "Connection lost. Estimates may be out of date."
+    : stale ? "Plan is stale. Estimates need attention."
+    : age === null ? "Times are shown in your local time"
+    : `Plan updated ${duration(age)} ago`;
+  const health = elements["forecast-health"];
+  if (health.textContent !== message) health.textContent = message;
+  health.classList.toggle("is-warning", Boolean(state.model && (!live || stale)));
+}
+
 function renderMilestones(now) {
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
   const cards = node("div", "milestone-cards");
   const done = [];
-  const unestimated = [];
-  for (const milestone of state.model.milestones || []) {
+  const milestones = state.model.milestones || [];
+  for (const milestone of milestones) {
     if (!milestone.hasRemaining) {
       done.push(milestone.name);
       continue;
     }
-    if (!milestone.hasEstimate) {
-      unestimated.push(milestone.name);
-      continue;
-    }
+    const name = milestone.name || "Ungrouped";
     const card = node("article", "milestone");
     const heading = node("div", "milestone-heading");
-    heading.append(node("h2", "", milestone.name || "Ungrouped"), node("span", "milestone-percentage", percent(milestone.progress)));
-    const dates = node("div", "milestone-dates");
-    for (const [key, title] of [["p50", "P50"], ["p90", "P90"]]) {
-      const field = node("span", "", `${title} `);
-      field.title = key === "p50" ? "50th-percentile projected finish (P50): the mean estimate" : "90th-percentile projected finish (P90): a one-sided normal approximation";
-      const value = node("strong");
-      field.append(value);
-      dates.append(field);
-      state.milestoneDates.push({ node: value, milestone, key });
+    heading.append(node("h3", "", name));
+    const progress = node("div", "milestone-progress");
+    const amount = node("div", "milestone-amount");
+    amount.append(node("strong", "milestone-percentage", percent(milestone.progress)), node("span", "", "progress"));
+    const meter = node("progress", "milestone-meter");
+    meter.max = PERCENT_SCALE;
+    meter.value = parseFloat(percent(milestone.progress));
+    meter.setAttribute("aria-label", `${name} progress`);
+    progress.append(amount, meter);
+    const measures = node("div", "milestone-measures");
+    measures.append(progress);
+    for (const [key, title] of [["p50", "Expected finish"], ["p90", "Later estimate"]]) {
+      const field = node("div", `milestone-date ${key === "p50" ? "expected-finish" : "later-finish"}`);
+      field.title = key === "p50"
+        ? "50th-percentile planning estimate (P50), based on the remaining task estimates"
+        : "90th-percentile planning estimate (P90), a later finish allowing for task uncertainty; not a guarantee";
+      const value = node("time", "forecast-time");
+      const remaining = key === "p50" ? node("span", "forecast-remaining") : null;
+      field.append(node("span", "forecast-label", title), value);
+      if (remaining) field.append(remaining);
+      measures.append(field);
+      state.milestoneDates.push({ node: value, remaining, milestone, key });
     }
-    card.append(heading, dates);
+    card.append(heading, measures);
+    if (!milestone.p50) {
+      card.classList.add("forecast-unavailable");
+      card.append(node("p", "forecast-explanation", milestone.hasEstimate
+        ? "Forecast unavailable. Review the plan for missing estimates or unresolved dependencies."
+        : "Needs estimates. Ask your coding agent to estimate the remaining tasks."));
+    }
     cards.append(card);
   }
   if (cards.childElementCount) elements.milestones.append(cards);
-  if (done.length) elements.milestones.append(node("p", "milestone-summary", `Done: ${done.join(", ")}`));
-  if (unestimated.length) elements.milestones.append(node("p", "milestone-summary", `Unestimated: ${unestimated.join(", ")}`));
+  if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.join(", ")}`));
+  if (!milestones.length) {
+    const hasAgents = (state.model.agents || []).length || (state.model.workflows || []).length;
+    elements.milestones.append(node("p", "overview-empty", hasAgents
+      ? "Agent activity is shown below. Add planned tasks with estimates to get progress and finish forecasts."
+      : "Add planned tasks with estimates to see progress and a finish forecast."));
+  }
   paintMilestones(now);
 }
 
@@ -820,7 +896,13 @@ function paintMilestones(now) {
   for (const item of state.milestoneDates) {
     const base = timestamp(item.milestone[item.key]);
     const time = base === null ? null : base + (item.milestone.hasRemaining ? modelAge(now) : 0);
-    item.node.textContent = time === null ? "Unestimated" : dateTime(time);
+    item.node.textContent = time === null ? (item.key === "p50" ? "Unknown" : "Unavailable") : forecastTime(time, now);
+    if (time === null) item.node.removeAttribute("datetime");
+    else item.node.dateTime = new Date(time).toISOString();
+    if (item.remaining) {
+      item.remaining.textContent = time === null ? "" : time <= now
+        ? "Expected now" : `About ${duration(Math.ceil((time - now) / MINUTE) * MINUTE)} left`;
+    }
   }
 }
 
@@ -879,11 +961,11 @@ function renderTimeline(now, resetRange = false) {
   if (state.follow) followNow(now);
   else setScroll(previousScroll);
   state.focusTargets.get(focusedKey)?.focus({ preventScroll: true });
-  if (state.detailPinned) {
+  if (state.detailsOpen) {
     const selected = state.detailEntries.get(state.detailKey);
-    if (selected) showDetails(selected.item, selected.kind, true, state.detailKey);
+    if (selected) showDetails(selected.item, selected.kind, state.detailKey);
     else {
-      state.detailPinned = false;
+      state.detailsOpen = false;
       elements.details.hidden = true;
     }
   }
@@ -930,11 +1012,19 @@ function renderFreshness(freshness) {
 function renderModel() {
   const now = Date.now();
   const model = state.model;
-  elements.project.textContent = model.project || "Unknown project";
+  elements.project.textContent = shortProject(model.project) || "Unknown project";
+  elements.project.title = model.project || "";
+  elements["session-heading"].hidden = false;
+  elements["session-name"].textContent = shortProject(model.project) || model.title || "Session";
+  elements["session-description"].textContent = model.title || "";
+  elements["session-description"].hidden = !model.title || model.title === shortProject(model.project);
   document.title = `${model.title || "Session"} · Live Gantt`;
   const tasks = model.tasks || [];
   const completed = tasks.filter(task => task.status === "completed").length;
-  elements["task-count"].textContent = `${completed}/${tasks.length} tasks done`;
+  elements.overview.hidden = false;
+  elements["overview-title"].textContent = !tasks.length ? "No planned tasks"
+    : completed === tasks.length ? "Planned tasks complete" : "Plan progress";
+  elements["task-count"].textContent = tasks.length ? `${completed} of ${tasks.length} planned tasks complete` : "";
   renderFreshness(model.freshness);
   renderMilestones(now);
   renderTimeline(now, state.follow || !state.range);
@@ -1038,15 +1128,9 @@ elements.timeline.addEventListener("scroll", () => {
   }
   state.lastScrollLeft = left;
 }, { passive: true });
-elements["close-details"].addEventListener("click", () => {
-  state.detailPinned = false;
-  elements.details.hidden = true;
-});
+elements["close-details"].addEventListener("click", () => closeDetails());
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape") {
-    state.detailPinned = false;
-    elements.details.hidden = true;
-  }
+  if (event.key === "Escape" && state.detailsOpen) closeDetails();
 });
 window.addEventListener("resize", () => {
   if (state.model) renderTimeline(Date.now(), state.follow);
