@@ -29,6 +29,7 @@ TIMESTAMP_PATTERN = re.compile(rb'"timestamp"\s*:\s*"([^"\\]+)"')
 CREATION_PATTERN = re.compile(r"^Task #(\S+) created successfully(?:\b|:)")
 NOTIFICATION_PATTERN = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 RESULT_LINE_PATTERN = re.compile(rb'"type"\s*:\s*"result"')
+TURN_RECORD_PATTERN = re.compile(rb'"type"\s*:\s*"(?:user|assistant)"')
 AGENT_ID_PATTERN = re.compile(r'(?:agentId|agent_id)\s*[":=]+\s*["\s]*([\w-]+)')
 TASK_ID_PATTERN = re.compile(r'(?:task_id|taskId)\s*[":=]+\s*["\s]*([\w-]+)')
 RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
@@ -271,6 +272,7 @@ class _Transcript:
     first: datetime | None = None
     last: datetime | None = None
     activity: str = ""
+    handed_back: datetime | None = None
     naming: _Naming = field(default_factory=_Naming)
     histories: dict[str, _TaskHistory] = field(default_factory=dict)
     notifications: dict[str, tuple[str, datetime]] = field(default_factory=dict)
@@ -283,6 +285,8 @@ class _Transcript:
             self.first = self.first or timestamp
             self.last = timestamp
         self.naming.read(line)
+        if TURN_RECORD_PATTERN.search(line):
+            self.handed_back = None
         if timestamp is None or not any(token in line for token in RELEVANT_TOKENS):
             return
         try:
@@ -291,6 +295,8 @@ class _Transcript:
             return
         if not isinstance(record, dict):
             return
+        if record.get("toolEndsTurn") is True:
+            self.handed_back = timestamp
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for text in _texts(content) + _queued_texts(record):
@@ -347,6 +353,21 @@ class _Transcript:
         task = TASK_ID_PATTERN.search(text)
         if agent and task:
             self.agent_aliases[task.group(1)] = agent.group(1)
+
+
+def _agent_state(transcript: _Transcript, notification: tuple[str, datetime] | None,
+                 now: datetime) -> tuple[str, datetime | None]:
+    """Return an agent's status and end: a terminal notification, else its own hand-back, else running or silent.
+
+    Activity after a notification means the agent was resumed, so that notification no longer applies."""
+    status, notified = notification or ("running", None)
+    resumed = bool(notified and transcript.last and transcript.last > notified)
+    if status not in LIVE_AGENT_STATUSES and not resumed:
+        return status, transcript.last or notified
+    if transcript.handed_back:
+        return "completed", transcript.last
+    quiet = transcript.last is not None and now - transcript.last >= SILENT_AFTER
+    return ("silent" if quiet else "running"), None
 
 
 @dataclass
@@ -743,12 +764,7 @@ class SourceStore:
             transcript = self._transcript(path)
             meta_path = directory / f"agent-{agent_id}.meta.json"
             metadata = _read_json(meta_path, warnings) if _stat(meta_path) else {}
-            notification = notifications.get(agent_id)
-            status, notification_time = notification if notification else ("running", None)
-            ended = transcript.last or notification_time
-            if status in LIVE_AGENT_STATUSES:
-                ended = None
-                status = "silent" if transcript.last and now - transcript.last >= SILENT_AFTER else "running"
+            status, ended = _agent_state(transcript, notifications.get(agent_id), now)
             agents[agent_id] = {
                 "id": agent_id, "description": self._text(metadata, "description", agent_id, warnings),
                 "agentType": self._text(metadata, "agentType", "", warnings),

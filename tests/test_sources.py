@@ -148,9 +148,11 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(by_id["working-agent"]["status"], "running")
         self.assertEqual(by_id["working-agent"]["activity"], "Check working-agent")
         self.assertEqual(by_id["silent-agent"]["status"], "silent")
+        self.assertIsNone(by_id["silent-agent"]["ended"])
         self.assertNotIn("finished-agent", by_id)
 
     def agent(self, agent_id, *records, directory=None, meta=None):
+        self.transcript.touch()
         agents_dir = directory or self.project_dir / self.list_id / "subagents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         (agents_dir / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta or {"description": agent_id}))
@@ -177,6 +179,36 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(agents["queued-agent"]["status"], "completed")
         self.assertEqual(agents["queued-agent"]["ended"], "2026-10-15T11:00:00Z")
         self.assertEqual(agents["attached-agent"]["status"], "failed")
+
+    def hand_back(self, timestamp, tool_id="hand-back"):
+        ended = self.result(timestamp, "Report delivered", tool_id)
+        ended["toolEndsTurn"] = True
+        return ended
+
+    def test_an_agent_that_handed_back_is_finished_without_a_notification(self):
+        self.agent("handed-back",
+                   self.tool("2026-10-15T09:00:00Z", "Bash", {"description": "Work"}),
+                   self.tool("2026-10-15T09:20:00Z", "SubagentHandback", {"message": "Report"}, "hand-back"),
+                   self.hand_back("2026-10-15T09:20:01Z"))
+        agent = self.agents_by_id()["handed-back"]
+        self.assertEqual(agent["status"], "completed")
+        self.assertEqual(agent["started"], "2026-10-15T09:00:00Z")
+        self.assertEqual(agent["ended"], "2026-10-15T09:20:01Z")
+
+    def test_a_resumed_agent_runs_again_until_it_hands_back_again(self):
+        self.agent("resumed",
+                   self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}),
+                   self.hand_back("2026-10-15T11:10:00Z"))
+        self.append({"type": "user", "timestamp": "2026-10-15T11:10:01Z", "message": {"content": self.notification("resumed")}})
+        self.assertEqual(self.agents_by_id()["resumed"]["status"], "completed")
+        self.append({"type": "user", "timestamp": "2026-10-15T11:40:00Z", "message": {"content": "Follow-up message"}},
+                    self.tool("2026-10-15T11:41:00Z", "Bash", {"description": "More work"}),
+                    path=self.project_dir / self.list_id / "subagents" / "agent-resumed.jsonl")
+        agent = self.agents_by_id()["resumed"]
+        self.assertEqual(agent["status"], "running")
+        self.assertIsNone(agent["ended"])
+        self.append(self.hand_back("2026-10-15T11:50:00Z"), path=self.project_dir / self.list_id / "subagents" / "agent-resumed.jsonl")
+        self.assertEqual(self.agents_by_id()["resumed"]["status"], "completed")
 
     def test_metadata_validation_live_journal_and_run_activity(self):
         journal = self.task_dir / "work.jsonl"
