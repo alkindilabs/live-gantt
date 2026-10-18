@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "live-gantt",
   "displayName": "Live Gantt",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A local, live Gantt chart of Claude Code tasks, agents, external runs, and milestone forecasts.",
   "keywords": ["gantt", "tasks", "agents", "planning", "local"],
   "author": {
@@ -10,6 +10,7 @@
     "email": "ferit@alkindi.pt",
     "url": "https://alkindi.pt"
   },
-  "homepage": "https://alkindi.pt",
-  "license": "MIT OR Apache-2.0"
+  "homepage": "https://github.com/alkindilabs/live-gantt",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/alkindilabs/live-gantt"
 }
