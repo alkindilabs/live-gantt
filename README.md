@@ -2,17 +2,26 @@
 
 Live Gantt shows how your Claude Code development plan is progressing and when each milestone is expected to finish. The overview pairs reported progress with an expected finish (50th-percentile planning estimate, P50) and a later estimate (90th-percentile planning estimate, P90). The timeline explains that outlook through tasks, agents, dependencies and recorded work. It runs on your machine, reads only local files and sends nothing anywhere. The task list is the plan; there is no separate plan file.
 
-Requires Python 3.11 or later. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service.
+Requires Python 3.11 or later. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service. Live Gantt is designed for Claude Code on macOS and Linux; Claude web chat and Cowork do not provide its local task files or service environment.
 
 ## Install as a Claude Code plugin
 
-This repository is both the plugin and its one-plugin marketplace. Nothing is published yet. With a local checkout, run these commands in Claude Code, replacing the example directory with the checkout's absolute path:
+This repository is both the plugin and its one-plugin marketplace. In your terminal, add the public marketplace and install the plugin:
 
-```text
-/plugin marketplace add /absolute/path/to/live-gantt
-/plugin install live-gantt@live-gantt
-/live-gantt:open
+```sh
+claude plugin marketplace add alkindilabs/live-gantt
+claude plugin install live-gantt@live-gantt
 ```
+
+Then start or restart Claude Code and run `/live-gantt:open`.
+
+To update an existing installation:
+
+```sh
+claude plugin update live-gantt@live-gantt
+```
+
+Restart Claude Code to load the updated plugin. Its SessionStart hook updates an existing local service when the plugin version advances. For local development, use the checkout's path instead of `alkindilabs/live-gantt` when adding the marketplace.
 
 The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing, and its freshness hooks keep the plan from going stale (see [Freshness](#freshness)).
 
