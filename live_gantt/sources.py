@@ -146,6 +146,18 @@ def _texts(content: Any) -> list[str]:
     return []
 
 
+def _queued_texts(record: dict[str, Any]) -> list[str]:
+    """Return the text of a command queued for the parent: a queue operation's content or a mid-turn attachment's prompt.
+
+    Task notifications arrive this way when the parent is busy, instead of as a user message."""
+    if record.get("type") == "queue-operation":
+        return _texts(record.get("content"))
+    attachment = record.get("attachment")
+    if record.get("type") == "attachment" and isinstance(attachment, dict) and attachment.get("type") == "queued_command":
+        return _texts(attachment.get("prompt"))
+    return []
+
+
 def _prompt_title(text: str) -> str:
     """Return the first line a person typed, after markup elements the harness put before it and lines holding only a tag."""
     while wrapper := LEADING_WRAPPER.match(text):
@@ -281,7 +293,7 @@ class _Transcript:
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        for text in _texts(content):
+        for text in _texts(content) + _queued_texts(record):
             self._read_notifications(text, timestamp)
         if not isinstance(content, list):
             return

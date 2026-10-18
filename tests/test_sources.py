@@ -150,6 +150,34 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(by_id["silent-agent"]["status"], "silent")
         self.assertNotIn("finished-agent", by_id)
 
+    def agent(self, agent_id, *records, directory=None, meta=None):
+        agents_dir = directory or self.project_dir / self.list_id / "subagents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta or {"description": agent_id}))
+        self.append(*records, path=agents_dir / f"agent-{agent_id}.jsonl")
+
+    def agents_by_id(self):
+        return {agent["id"]: agent for agent in self.state()["agents"]}
+
+    @staticmethod
+    def notification(task_id, status="completed"):
+        return f"<task-notification>\n<task-id>{task_id}</task-id>\n<status>{status}</status>\n</task-notification>"
+
+    def test_notifications_queued_or_attached_mid_turn_end_their_agents(self):
+        for agent_id in ("queued-agent", "attached-agent"):
+            self.agent(agent_id, self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}))
+        self.append(
+            {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-15T11:10:00Z",
+             "content": self.notification("queued-agent")},
+            {"type": "attachment", "timestamp": "2026-10-15T11:11:00Z",
+             "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                            "prompt": self.notification("attached-agent", "failed")}},
+        )
+        agents = self.agents_by_id()
+        self.assertEqual(agents["queued-agent"]["status"], "completed")
+        self.assertEqual(agents["queued-agent"]["ended"], "2026-10-15T11:00:00Z")
+        self.assertEqual(agents["attached-agent"]["status"], "failed")
+
     def test_metadata_validation_live_journal_and_run_activity(self):
         journal = self.task_dir / "work.jsonl"
         journal.write_text('{"type":"result"}\n{"type": "result"}\n{"type":"other"}\n')
