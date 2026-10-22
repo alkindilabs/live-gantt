@@ -12,7 +12,8 @@ import sys
 import tempfile
 import time
 
-MINIMUM_PYTHON = (3, 11)
+from .python_support import MINIMUM_PYTHON
+
 APPLICATION_DIRECTORY = "live-gantt"
 PACKAGE_DIRECTORY = "live_gantt"
 VERSION_FILENAME = "version"

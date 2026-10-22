@@ -2,7 +2,7 @@
 
 Live Gantt shows how your Claude Code development plan is progressing and when each milestone is expected to finish. The overview pairs reported progress with an expected finish (50th-percentile planning estimate, P50) and a later estimate (90th-percentile planning estimate, P90). The timeline explains that outlook through tasks, agents, dependencies and recorded work. It runs on your machine, reads only local files and sends nothing anywhere. The task list is the plan; there is no separate plan file.
 
-Requires Python 3.11 or later. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service. Live Gantt is designed for Claude Code on macOS and Linux; Claude web chat and Cowork do not provide its local task files or service environment.
+Requires Python 3.11 or later. Hooks started under an older `python3`, as Codex's background daemon does on macOS, re-run under Homebrew's Python when it is installed. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service. Live Gantt is designed for Claude Code on macOS and Linux; Claude web chat and Cowork do not provide its local task files or service environment.
 
 ## Install as a Claude Code plugin
 

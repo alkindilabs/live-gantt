@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from live_gantt.python_support import MINIMUM_PYTHON, NEWER_PYTHONS
+
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 HOOKS = REPOSITORY / "hooks"
@@ -325,3 +327,66 @@ class FreshnessHookTests(unittest.TestCase):
                            if any(hook["command"] == command for hook in entry["hooks"])]
                 self.assertEqual(len(entries), 1)
                 self.assertEqual(entries[0].get("matcher"), matcher)
+
+
+SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+def python_version(executable):
+    """The (major, minor) version an interpreter reports, or None when it cannot run."""
+    try:
+        result = subprocess.run([executable, "-c", "import sys; print(*sys.version_info[:2])"],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return tuple(int(part) for part in result.stdout.split()) if result.returncode == 0 else None
+
+
+class OlderPythonHookTests(unittest.TestCase):
+    """Codex's background daemon and desktop app start hooks with the login PATH, where macOS
+    finds Apple's older `python3`: each hook must behave there as under a supported one."""
+
+    @classmethod
+    def setUpClass(cls):
+        system = python_version(SYSTEM_PYTHON)
+        if system is None or system >= MINIMUM_PYTHON:
+            raise unittest.SkipTest(f"{SYSTEM_PYTHON} is not older than Python {MINIMUM_PYTHON}")
+        if not any((python_version(candidate) or ()) >= MINIMUM_PYTHON for candidate in NEWER_PYTHONS):
+            raise unittest.SkipTest("no supported Python at the locations hooks hand off to")
+
+    def run_hook(self, python, hook, event_name, **fields):
+        """Runs a hook in a fresh session whose in-progress task lacks progress."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task_dir = root / "claude" / "tasks" / SESSION_ID
+            task_dir.mkdir(parents=True)
+            (task_dir / "1.json").write_text(json.dumps({
+                "id": "1", "subject": "Build release", "status": "in_progress", "blocks": [], "blockedBy": [],
+                "metadata": {"estimate": {"low": 1, "likely": 2, "high": 3}, "lane": "Build"},
+            }))
+            transcript = root / "claude" / "projects" / "-example" / f"{SESSION_ID}.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text('{"type":"user","message":{"content":"Work"}}\n')
+            event = {"session_id": SESSION_ID, "transcript_path": str(transcript), "hook_event_name": event_name,
+                     **fields}
+            environment = {**os.environ, "HOME": str(root), "XDG_DATA_HOME": str(root / "xdg"),
+                           "CLAUDE_CONFIG_DIR": str(root / "claude"), "CLAUDE_PLUGIN_DATA": str(root / "data")}
+            result = subprocess.run([python, "-B", str(HOOKS / hook)], input=json.dumps(event), text=True,
+                                    capture_output=True, env=environment, check=False)
+            return result.returncode, result.stdout, result.stderr
+
+    def test_every_hook_hands_off_from_an_older_python_to_a_supported_one(self):
+        runs = {
+            "task_created.py": ("PostToolUse", {"tool_name": "TaskCreate",
+                                                "tool_input": {"subject": "Build release", "metadata": {}},
+                                                "tool_response": {"task": {"id": "17", "subject": "Build release"}}}),
+            "freshness.py": ("UserPromptSubmit", {"prompt": "Continue"}),
+            "session_start.py": ("SessionStart", {"source": "startup"}),
+        }
+        supported = {}
+        for hook, (event_name, fields) in runs.items():
+            with self.subTest(hook=hook):
+                supported[hook] = self.run_hook(sys.executable, hook, event_name, **fields)
+                self.assertEqual(supported[hook], self.run_hook(SYSTEM_PYTHON, hook, event_name, **fields))
+        self.assertIn("cannot schedule", supported["task_created.py"][1])
+        self.assertIn("progress", supported["freshness.py"][1])
