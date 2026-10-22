@@ -12,6 +12,10 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+from live_gantt.python_support import require_supported_python
+
+require_supported_python()
+
 from live_gantt.installation import VERSION_FILENAME, installation_directory
 
 
