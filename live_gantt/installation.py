@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-from .python_support import MINIMUM_PYTHON
+from .python_support import MINIMUM_PYTHON, supported
 
 APPLICATION_DIRECTORY = "live-gantt"
 PACKAGE_DIRECTORY = "live_gantt"
@@ -129,11 +129,12 @@ def _service_target(system, plugin_root, home, environ):
 
 
 def service_python(which, executable):
-    """The interpreter the service runs: `python3` as found on PATH, kept unresolved so that a
-    package manager moving its versioned binary (Homebrew's Cellar) does not strand the service;
-    else the interpreter running the installer."""
+    """The interpreter the service runs: `python3` as found on PATH when it is a supported
+    version, kept unresolved so that a package manager moving its versioned binary (Homebrew's
+    Cellar) does not strand the service; else the interpreter running the installer, which its
+    entry points have already checked. Codex's daemon finds macOS's Python 3.9 first on PATH."""
     found = which("python3")
-    return Path(found) if found else Path(executable)
+    return Path(found) if found and supported(found) else Path(executable)
 
 
 def install(plugin_root):

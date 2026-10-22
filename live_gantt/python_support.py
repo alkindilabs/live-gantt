@@ -23,12 +23,13 @@ def require_supported_python():
     if sys.version_info >= MINIMUM_PYTHON:
         return
     for candidate in NEWER_PYTHONS:
-        if _supported(candidate):
+        if supported(candidate):
             os.execv(candidate, [candidate, "-B", os.path.abspath(sys.argv[0]), *sys.argv[1:]])
     sys.exit(0)
 
 
-def _supported(candidate):
+def supported(candidate):
+    """Whether the interpreter at `candidate` runs and reports at least MINIMUM_PYTHON."""
     if not os.access(candidate, os.X_OK):
         return False
     return subprocess.run([candidate, "-c", SUPPORTED_CHECK], stdin=subprocess.DEVNULL,

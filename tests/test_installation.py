@@ -1,5 +1,6 @@
 from pathlib import Path
 import plistlib
+import tempfile
 import unittest
 
 from live_gantt.installation import (
@@ -12,14 +13,35 @@ from live_gantt.installation import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNNING_PYTHON = "/opt/homebrew/Cellar/python@3.14/3.14.6/bin/python3.14"
+SUPPORTED_EXIT = 0
+UNSUPPORTED_EXIT = 1
+
+
+def linked_python3(directory, version_check_exit):
+    """A `python3` symlink, as a package manager installs one, to a stand-in interpreter that
+    answers the supported-version check with `version_check_exit`."""
+    target = Path(directory) / "Cellar" / "python3.x"
+    target.parent.mkdir()
+    target.write_text(f"#!/bin/sh\nexit {version_check_exit}\n")
+    target.chmod(0o755)
+    link = Path(directory) / "bin" / "python3"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    return str(link)
 
 
 class InstallationTests(unittest.TestCase):
-    def test_service_python_keeps_the_path_found_unresolved(self):
-        found = "/opt/homebrew/bin/python3"
-        running = "/opt/homebrew/Cellar/python@3.14/3.14.6/bin/python3.14"
-        self.assertEqual(service_python(lambda _name: found, running), Path(found))
-        self.assertEqual(service_python(lambda _name: None, running), Path(running))
+    def test_service_python_keeps_a_supported_python3_on_path_unresolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            found = linked_python3(directory, SUPPORTED_EXIT)
+            self.assertEqual(service_python(lambda _name: found, RUNNING_PYTHON), Path(found))
+        self.assertEqual(service_python(lambda _name: None, RUNNING_PYTHON), Path(RUNNING_PYTHON))
+
+    def test_service_python_passes_over_an_older_python3_found_first_on_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            found = linked_python3(directory, UNSUPPORTED_EXIT)
+            self.assertEqual(service_python(lambda _name: found, RUNNING_PYTHON), Path(RUNNING_PYTHON))
 
     def test_installation_directory_by_os_and_xdg_setting(self):
         home = Path("/users/reader")

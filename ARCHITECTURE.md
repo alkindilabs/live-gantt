@@ -66,7 +66,7 @@ Agent/run bars show descriptive activity or state. Labels fit inside the right e
 
 ## Installation and service lifecycle
 
-[installation.py](live_gantt/installation.py) owns platform choice, stable user paths, service rendering, replacement and removal. Entry points delegate after checking the running Python version; no package installation occurs. The service runs a copy independent of plugin caches. macOS uses user Application Support; Linux honors absolute `XDG_DATA_HOME`/`XDG_CONFIG_HOME`, otherwise standard user directories.
+[installation.py](live_gantt/installation.py) owns platform choice, stable user paths, service rendering, replacement and removal. Entry points delegate after checking the running Python version; no package installation occurs. The service runs a copy independent of plugin caches, under `python3` from PATH when supported, else the installer's own: Codex's daemon finds macOS's 3.9 first. macOS uses user Application Support; Linux honors absolute `XDG_DATA_HOME`/`XDG_CONFIG_HOME`, otherwise standard user directories.
 
 An update stages replacement files before stopping the service, then replaces the package as a whole so removed files cannot survive. The version marker changes only after service registration succeeds. Failure reports an error and leaves the previous marker for a later retry; installation is not a rollback transaction. An explicit `CLAUDE_CONFIG_DIR` override is saved beside the installed package and reused on upgrades unless supplied again; an explicitly empty value clears it. Installation never changes Claude Code's files.
 
