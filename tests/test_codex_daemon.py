@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -158,6 +159,11 @@ class DaemonPeer:
         self.listener.close()
 
 
+def held_writer_lock(path):
+    info = Path(path).stat()
+    return (info.st_dev, info.st_ino), True
+
+
 @unittest.skipUnless(hasattr(socket, 'AF_UNIX'), 'Local Unix socket contract')
 class CodexDaemonTests(unittest.TestCase):
     def setUp(self):
@@ -181,6 +187,8 @@ class CodexDaemonTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch('live_gantt.liveness.run_command', side_effect=command).start()
         patch('platform.system', return_value='Darwin').start()
+        if sys.platform != 'darwin':
+            patch('live_gantt.liveness._writer_lock', side_effect=held_writer_lock).start()
         self.store = ProviderStore(self.root / 'claude', codex_root=self.root)
         self.addCleanup(self.store.close)
 
