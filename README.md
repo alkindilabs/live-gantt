@@ -21,6 +21,8 @@ To update an existing installation:
 claude plugin update live-gantt@live-gantt
 ```
 
+If you installed from the Bench and Wrench marketplace instead, the plugin is `live-gantt@bench-and-wrench`, and that marketplace pins each release, so update with `claude plugin marketplace update bench-and-wrench` first.
+
 Restart Claude Code to load the updated plugin. Its SessionStart hook updates an existing local service when the plugin version advances. For local development, use the checkout's path instead of `alkindilabs/live-gantt` when adding the marketplace.
 
 The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing, and its freshness hooks keep the plan from going stale (see [Freshness](#freshness)).
