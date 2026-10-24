@@ -12,84 +12,123 @@
   <body>
     <main>
       <header class="page-header">
-        <div class="identity">
-          <h1>Live Gantt</h1>
-          <p id="project" class="project">Claude Code sessions</p>
-        </div>
-        <div id="session-control" class="session-control">
-          <button id="session" class="session-button" type="button" aria-haspopup="listbox" aria-expanded="false"
-                  aria-controls="session-panel" aria-keyshortcuts="/" title="Switch session (/)">
-            <span id="session-title" class="session-title">Loading sessions…</span>
-            <span id="session-meta" class="session-meta"></span>
-          </button>
-          <div id="session-panel" class="session-panel" hidden>
-            <div class="session-search">
-              <input id="session-filter" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true"
-                     aria-controls="session-options" aria-label="Filter sessions by title, prompt or project"
-                     placeholder="Filter by title, prompt or project" autocomplete="off" spellcheck="false">
-              <label class="session-scope"><input id="session-all" type="checkbox"> All sessions</label>
+        <h1>Live Gantt</h1>
+        <section class="session-context" aria-labelledby="session-scope-title">
+          <h2 id="session-scope-title" class="visually-hidden">Session</h2>
+          <div id="session-control" class="session-control">
+            <button id="session" class="session-button" type="button" aria-haspopup="listbox" aria-expanded="false"
+                    aria-controls="session-panel" aria-describedby="project" aria-keyshortcuts="/" title="Switch session (/)">
+              <span id="session-title" class="session-title">Loading sessions…</span>
+              <span id="session-meta" class="session-meta"></span>
+            </button>
+            <div id="session-panel" class="session-panel" hidden>
+              <div class="session-search">
+                <input id="session-filter" type="search" role="combobox" aria-autocomplete="list" aria-expanded="true"
+                       aria-controls="session-options" aria-label="Filter sessions by title, prompt or project"
+                       placeholder="Filter by title, prompt or project" autocomplete="off" spellcheck="false">
+                <label class="session-scope"><input id="session-all" type="checkbox"> All sessions</label>
+              </div>
+              <ul id="session-options" class="session-options" role="listbox" aria-label="Sessions"></ul>
+              <p id="session-summary" class="session-summary"></p>
             </div>
-            <ul id="session-options" class="session-options" role="listbox" aria-label="Sessions"></ul>
-            <p id="session-summary" class="session-summary"></p>
           </div>
-        </div>
-        <div id="connection" class="connection disconnected" role="status" aria-live="polite">
-          <span class="connection-dot" aria-hidden="true"></span>
-          <span id="connection-text">Connecting</span><span id="connection-age" aria-hidden="true"></span>
-        </div>
-      </header>
+          <p id="project" class="visually-hidden">Claude Code and Codex sessions</p>
+        </section>
 
-      <section id="session-heading" class="session-heading" aria-labelledby="session-name" hidden>
-        <h2 id="session-name"></h2>
-        <p id="session-description"></p>
-      </section>
-      <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
-        <div class="overview-heading">
-          <div>
-            <h2 id="overview-title">Plan progress</h2>
-            <p id="task-count" class="task-count"></p>
+        <section id="monitor-status" class="monitor-status" data-state="unverified" aria-label="Session monitor" hidden>
+          <div class="monitor-copy" role="status" aria-live="polite">
+            <strong id="monitor-title">Unable to verify</strong>
+            <p id="monitor-summary">Waiting for current session evidence.</p>
           </div>
-          <p id="forecast-health" class="forecast-health"></p>
+          <p id="monitor-activity" class="monitor-activity"></p>
+          <details id="monitor-details" class="compact-disclosure monitor-details">
+            <summary>Details</summary>
+            <div class="disclosure-content">
+              <p id="monitor-last-known" class="monitor-last-known" hidden></p>
+              <div class="monitor-diagnostics">
+                <div id="connection" class="connection disconnected">
+                  <span class="connection-dot" aria-hidden="true"></span>
+                  <span id="connection-text">Connecting</span><span id="connection-age" aria-hidden="true"></span>
+                </div>
+                <p id="harness-health" class="harness-health">Harness: unknown</p>
+                <p id="forecast-health" class="forecast-health"></p>
+              </div>
+              <ul id="monitor-issues" class="monitor-issues" hidden></ul>
+              <section id="freshness" class="freshness-alert" aria-label="Plan findings" hidden></section>
+            </div>
+          </details>
+        </section>
+
+        <button id="overview-toggle" class="overview-toggle" type="button" aria-expanded="false" aria-controls="overview-panel">Overview</button>
+      </header>
+      <div class="workspace">
+        <aside id="overview-panel" class="overview-panel" aria-label="Session overview" tabindex="-1">
+          <section class="usage" aria-labelledby="usage-title">
+            <h2 id="usage-title">Account usage</h2>
+            <div id="usage-providers" class="usage-providers"><p class="usage-empty">Reading local usage…</p></div>
+          </section>
+
+          <section id="overview" class="overview" aria-labelledby="overview-title" hidden>
+            <div class="overview-heading">
+              <div>
+                <h2 id="overview-title">Plan progress</h2>
+                <p id="task-count" class="task-count"></p>
+              </div>
+            </div>
+            <div id="milestones" class="milestones" aria-label="Milestone progress and finish estimates"></div>
+          </section>
+          <section id="session-tokens" class="session-tokens" aria-labelledby="tokens-title" hidden>
+            <div class="tokens-heading"><h2 id="tokens-title">Session tokens</h2></div>
+            <dl id="token-values" class="token-values"></dl>
+            <details class="compact-disclosure session-disclosure">
+              <summary>Details</summary>
+              <div class="disclosure-content">
+                <section id="session-heading" class="session-heading" aria-labelledby="session-name" hidden>
+                  <p id="session-provider" class="session-provider"></p>
+                  <h2 id="session-name"></h2>
+                  <p id="session-description"></p>
+                </section>
+                <p>Recorded for this session only; child sessions excluded. Totals follow the provider’s accounting; categories can overlap.</p>
+              </div>
+            </details>
+          </section>
+          <section id="warnings" class="source-warnings" aria-label="Source warnings" hidden></section>
+        </aside>
+        <div class="work-area">
+          <section class="chart-shell" aria-label="Session work timeline">
+            <div class="toolbar">
+              <div class="chart-heading"><h2>Work timeline</h2></div>
+              <div class="zoom-controls" role="group" aria-label="Timeline zoom">
+                <button type="button" data-zoom="12h" aria-pressed="false">12 h</button>
+                <button type="button" data-zoom="3d" aria-pressed="false">3 days</button>
+                <button type="button" data-zoom="week" aria-pressed="false">Week</button>
+                <button type="button" data-zoom="fit" aria-pressed="false">Fit</button>
+              </div>
+              <button id="follow" class="follow" type="button" aria-pressed="true">Following now</button>
+              <details class="legend-disclosure">
+                <summary>Status key</summary>
+                <div class="legend" aria-label="Status legend">
+                  <span><i class="legend-swatch done" aria-hidden="true"></i>Done</span>
+                  <span><i class="legend-swatch running" aria-hidden="true"></i>Running</span>
+                  <span><i class="legend-swatch projected" aria-hidden="true"></i>Projected</span>
+                  <span><i class="legend-swatch projected" aria-hidden="true"></i>Queued</span>
+                  <span><i class="legend-swatch overrun" aria-hidden="true"></i>Overrun</span>
+                  <span><i class="legend-swatch blocked" aria-hidden="true"></i>Blocked</span>
+                  <span><i class="legend-swatch silent" aria-hidden="true"></i>Silent</span>
+                </div>
+              </details>
+            </div>
+            <p id="notice" class="notice" role="status">Reading local sessions…</p>
+            <div id="timeline" class="timeline" tabindex="0" aria-label="Work timeline; scroll vertically for work and horizontally for time">
+              <div id="timeline-content" class="timeline-content"></div>
+            </div>
+          </section>
+          <aside id="details" class="details" aria-label="Work details" hidden>
+            <div class="details-header"><span>Work details</span><button id="close-details" class="close-details" type="button" aria-label="Close details">Close</button></div>
+            <div id="details-content"></div>
+          </aside>
         </div>
-        <div id="milestones" class="milestones" aria-label="Milestone progress and finish estimates"></div>
-      </section>
-      <section id="freshness" class="freshness-alert" role="alert" aria-label="Stale plan" hidden></section>
-      <div class="work-area">
-      <section class="chart-shell" aria-label="Session work timeline">
-        <div class="toolbar">
-          <div class="chart-heading"><h2>Work timeline</h2></div>
-          <div class="zoom-controls" role="group" aria-label="Timeline zoom">
-            <button type="button" data-zoom="12h" aria-pressed="false">12 h</button>
-            <button type="button" data-zoom="3d" aria-pressed="false">3 days</button>
-            <button type="button" data-zoom="week" aria-pressed="false">Week</button>
-            <button type="button" data-zoom="fit" aria-pressed="false">Fit</button>
-          </div>
-          <button id="follow" class="follow" type="button" aria-pressed="true">Following now</button>
-        </div>
-        <details class="legend-disclosure">
-        <summary>Status key</summary>
-        <div class="legend" aria-label="Status legend">
-          <span><i class="legend-swatch done" aria-hidden="true"></i>Done</span>
-          <span><i class="legend-swatch running" aria-hidden="true"></i>Running</span>
-          <span><i class="legend-swatch projected" aria-hidden="true"></i>Projected</span>
-          <span><i class="legend-swatch projected" aria-hidden="true"></i>Queued</span>
-          <span><i class="legend-swatch overrun" aria-hidden="true"></i>Overrun</span>
-          <span><i class="legend-swatch blocked" aria-hidden="true"></i>Blocked</span>
-          <span><i class="legend-swatch silent" aria-hidden="true"></i>Silent</span>
-        </div>
-        </details>
-        <p id="notice" class="notice" role="status">Reading local sessions…</p>
-        <div id="timeline" class="timeline" tabindex="0" aria-label="Timeline; scroll horizontally to explore time">
-          <div id="timeline-content" class="timeline-content"></div>
-        </div>
-        <p class="chart-help">Select work to inspect its progress and history. Scroll the timeline to explore time.</p>
-      </section>
-      <aside id="details" class="details" aria-label="Work details" hidden>
-        <div class="details-header"><span>Work details</span><button id="close-details" class="close-details" type="button" aria-label="Close details">Close</button></div>
-        <div id="details-content"></div>
-      </aside>
       </div>
-      <section id="warnings" class="source-warnings" aria-label="Source warnings" hidden></section>
     </main>
   </body>
 </html>

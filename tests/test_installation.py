@@ -1,14 +1,23 @@
 from pathlib import Path
+import json
+import os
 import plistlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from live_gantt import installation
 from live_gantt.installation import (
     installation_directory,
     installation_settings,
+    install,
     launchd_configuration,
     service_python,
     systemd_configuration,
+    uninstall,
 )
 
 
@@ -29,6 +38,129 @@ def linked_python3(directory, version_check_exit):
     link.parent.mkdir()
     link.symlink_to(target)
     return str(link)
+
+
+class InstalledCodexCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="live gantt installation ")
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name).resolve() / "user home"
+        self.home.mkdir()
+        self.plugin = Path(self.temporary.name) / "plugin source"
+        self.plugin.mkdir()
+        for name in (".claude-plugin", "launchd", "systemd"):
+            shutil.copytree(ROOT / name, self.plugin / name)
+        self.package = self.plugin / "live_gantt"
+        self.package.mkdir()
+        (self.package / "__init__.py").write_text("")
+        self.write_launcher("first")
+        self.command = self.home / ".local/bin/live-gantt-codex"
+        self.environment = {"PATH": "", "HOME": str(self.home)}
+
+    def write_launcher(self, version):
+        (self.package / "codex_launcher.py").write_text(
+            "import json, os, sys\n"
+            f"print(json.dumps({{'version': {version!r}, 'args': sys.argv[1:], "
+            "'pythonpath': os.environ['PYTHONPATH'], 'cwd': os.getcwd()}))\n"
+            "sys.exit(17)\n"
+        )
+
+    def change_installation(self, action):
+        with patch("live_gantt.installation.platform.system", return_value="Linux"), \
+                patch("live_gantt.installation.Path.home", return_value=self.home), \
+                patch.dict(os.environ, self.environment, clear=True), \
+                patch("live_gantt.installation.subprocess.run",
+                      return_value=subprocess.CompletedProcess([], 0)):
+            action(self.plugin)
+
+    def test_install_and_upgrade_create_an_executable_stable_command(self):
+        self.change_installation(install)
+        self.assertTrue(self.command.is_file())
+        self.assertTrue(os.access(self.command, os.X_OK))
+        first = subprocess.run([str(self.command)], capture_output=True, text=True)
+        self.assertEqual(first.returncode, 17, first.stderr)
+        self.assertEqual(json.loads(first.stdout)["version"], "first")
+        self.write_launcher("upgraded")
+        self.change_installation(install)
+        upgraded = subprocess.run([str(self.command)], capture_output=True, text=True)
+        self.assertEqual(upgraded.returncode, 17, upgraded.stderr)
+        self.assertEqual(json.loads(upgraded.stdout)["version"], "upgraded")
+
+    def test_command_preserves_arguments_and_uses_stable_paths_with_spaces(self):
+        binaries = self.home / "python binaries"
+        binaries.mkdir()
+        (binaries / "python3").symlink_to(sys.executable)
+        self.environment["PATH"] = str(binaries)
+        self.change_installation(install)
+        self.assertTrue(self.command.is_file())
+        hostile_directory = self.home / "untrusted project"
+        hostile_package = hostile_directory / "live_gantt"
+        hostile_package.mkdir(parents=True)
+        (hostile_package / "__init__.py").write_text("raise RuntimeError('untrusted package')\n")
+        args = ["", "two words", "literal'quote", '"double"', "$(exit 9)", "--flag"]
+        result = subprocess.run(
+            [str(self.command), *args], cwd=hostile_directory,
+            env={**os.environ, "PYTHONPATH": str(hostile_directory)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 17, result.stderr)
+        reported = json.loads(result.stdout)
+        self.assertEqual(reported["args"], args)
+        self.assertEqual(reported["cwd"], str(hostile_directory))
+        self.assertEqual(reported["pythonpath"], str(self.home / ".local/share/live-gantt"))
+
+    def assert_conflicting_command_is_preserved(self, kind):
+        self.command.parent.mkdir(parents=True)
+        unrelated = self.home / "unrelated command"
+        unrelated.write_text("user-owned content")
+        if kind == "file":
+            self.command.write_text("user-owned content")
+        elif kind == "symlink":
+            self.command.symlink_to(unrelated)
+        else:
+            self.command.mkdir()
+        with self.assertRaisesRegex(FileExistsError, "live-gantt-codex"):
+            self.change_installation(install)
+        self.assertFalse((self.home / ".local/share/live-gantt").exists())
+        self.assertEqual(unrelated.read_text(), "user-owned content")
+        if kind == "directory":
+            self.assertTrue(self.command.is_dir())
+        else:
+            self.assertEqual(self.command.read_text(), "user-owned content")
+            self.assertEqual(self.command.is_symlink(), kind == "symlink")
+
+    def test_install_rejects_an_unrelated_command_file(self):
+        self.assert_conflicting_command_is_preserved("file")
+
+    def test_install_rejects_a_binary_command_without_decoding_it(self):
+        self.command.parent.mkdir(parents=True)
+        content = b"\xff\xfe user binary"
+        self.command.write_bytes(content)
+        with self.assertRaisesRegex(FileExistsError, "live-gantt-codex"):
+            self.change_installation(install)
+        self.assertEqual(self.command.read_bytes(), content)
+
+    def test_install_rejects_a_command_symlink(self):
+        self.assert_conflicting_command_is_preserved("symlink")
+
+    def test_install_rejects_a_command_directory(self):
+        self.assert_conflicting_command_is_preserved("directory")
+
+    def test_uninstall_removes_only_the_owned_command(self):
+        self.change_installation(install)
+        self.assertTrue(self.command.exists())
+        self.change_installation(uninstall)
+        self.assertFalse(self.command.exists())
+        self.command.write_text("user-owned content")
+        self.change_installation(uninstall)
+        self.assertEqual(self.command.read_text(), "user-owned content")
+        self.command.unlink()
+        unrelated = self.home / "unrelated command"
+        unrelated.write_text("user-owned content")
+        self.command.symlink_to(unrelated)
+        self.change_installation(uninstall)
+        self.assertTrue(self.command.is_symlink())
+        self.assertEqual(unrelated.read_text(), "user-owned content")
 
 
 class InstallationTests(unittest.TestCase):
@@ -61,6 +193,12 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             installation_directory("Windows", home, {})
 
+    def test_variables_of_removed_features_are_not_carried_into_the_service(self):
+        previous = {"CODEX_HOME": "/sources/codex", "LIVE_GANTT_CODEX_BIN": "/stable/bin/codex",
+                    "LIVE_GANTT_LIVE_USAGE": "1", "LIVE_GANTT_CLAUDE_BIN": "/old/claude"}
+        self.assertEqual(installation_settings({}, previous),
+                         {"CODEX_HOME": "/sources/codex", "LIVE_GANTT_CODEX_BIN": "/stable/bin/codex"})
+
     def test_source_configuration_survives_an_upgrade_without_the_variable(self):
         previous = {"CLAUDE_CONFIG_DIR": "/sources/previous"}
         self.assertEqual(installation_settings({}, previous), previous)
@@ -69,6 +207,14 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(installation_settings({}, {}), {})
         self.assertEqual(installation_settings({"CLAUDE_CONFIG_DIR": ""}, previous), {})
         self.assertEqual(previous, {"CLAUDE_CONFIG_DIR": "/sources/previous"})
+
+    def test_codex_and_claude_source_overrides_are_preserved_independently(self):
+        previous = {"CLAUDE_CONFIG_DIR": "/sources/claude", "CODEX_HOME": "/sources/codex"}
+        self.assertEqual(installation_settings({}, previous), previous)
+        self.assertEqual(installation_settings({"CODEX_HOME": ""}, previous),
+                         {"CLAUDE_CONFIG_DIR": "/sources/claude"})
+        self.assertEqual(installation_settings({"CLAUDE_CONFIG_DIR": ""}, previous),
+                         {"CODEX_HOME": "/sources/codex"})
 
     def test_launchd_runs_the_stable_copy_with_interactive_priorities(self):
         directory = Path("/users/reader/Library/Application Support/live-gantt")

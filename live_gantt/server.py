@@ -1,4 +1,4 @@
-"""Loopback HTTP transport and demand-driven source polling."""
+"""Loopback HTTP transport and recoverable session synchronization."""
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,11 +16,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from .freshness import assess
 from .schedule import project
-from .sources import LIST_ID, SourceStore, parse_time
+from .sources import LIST_ID, parse_time
+from .providers import CODEX_PREFIX, ProviderStore
+from .liveness import unknown_liveness
+from .monitoring import summarize
 
 
 DEFAULT_PORT = 4791
 POLL_SECONDS = 2.0
+BACKGROUND_SESSION_SECONDS = 600.0
 HEARTBEAT_SECONDS = 15.0
 SOCKET_TIMEOUT_SECONDS = 20.0
 LOOPBACK = "127.0.0.1"
@@ -28,6 +32,11 @@ STATIC = Path(__file__).with_name("static")
 STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                 "/style.css": ("style.css", "text/css; charset=utf-8"),
                 "/app.js": ("app.js", "text/javascript; charset=utf-8")}
+SOURCE_RETRY_MESSAGE = "Session files could not be read completely. Retrying automatically."
+
+
+class _SourceUnavailable(Exception):
+    pass
 
 
 def _favicon():
@@ -64,9 +73,9 @@ def fingerprint(value):
 
 @dataclass
 class Monitor:
-    """Serialize source access and poll only while event-stream readers exist."""
+    """Keep the last opened session synchronized, isolating failed source reads."""
 
-    source: SourceStore
+    source: ProviderStore
     poll_seconds: float = POLL_SECONDS
     heartbeat_seconds: float = HEARTBEAT_SECONDS
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -75,65 +84,182 @@ class Monitor:
     list_model: list = field(default_factory=list)
     worker: threading.Thread | None = None
     stopping: bool = False
+    usage_readers: int = 0
+    usage_model: tuple | None = None
+    background_session: str | None = None
+    background_until: float = 0.0
+    sync_states: dict = field(default_factory=dict)
+    liveness_states: dict = field(default_factory=dict)
+    runtime_states: dict = field(default_factory=dict)
+    native_states: dict = field(default_factory=dict)
+
+    def _sync(self, list_id, now, error=None):
+        previous = self.sync_states.get(list_id, {})
+        self.sync_states[list_id] = {
+            "status": "retrying" if error else "current",
+            "checkedAt": previous.get("checkedAt") if error else now.isoformat(),
+            "error": error,
+        }
+
+    def sync(self, list_id):
+        """Return source-read health independently of transport activity."""
+        with self.condition:
+            return dict(self.sync_states.get(list_id, {
+                "status": "retrying", "checkedAt": None, "error": SOURCE_RETRY_MESSAGE,
+            }))
+
+    def _snapshot(self, list_id):
+        snapshot = self.models.get(list_id)
+        if snapshot is None:
+            return None
+        sync = self.sync(list_id)
+        liveness = self.liveness_states.get(list_id)
+        model = {**snapshot[1], "sync": sync, "liveness": liveness}
+        observed = parse_time(sync.get("checkedAt")) or datetime.now(timezone.utc)
+        monitor = summarize(model, observed,
+                            runtime=self.runtime_states.get(list_id), native=self.native_states.get(list_id))
+        verdict = ({key: value for key, value in liveness.items() if key != "checkedAt"}
+                   if liveness is not None else None)
+        digest = fingerprint((snapshot[0], sync["status"], sync["error"], verdict, monitor))
+        return digest, {**model, "monitor": monitor}
 
     def _refresh(self, ids, *, fresh_projection=False):
-        self.list_model = self.source.lists()
         now = datetime.now(timezone.utc)
+        try:
+            self.list_model = self.source.lists()
+            discovery_errors = self.source.discovery_errors
+            self._sync(None, now, SOURCE_RETRY_MESSAGE if discovery_errors else None)
+        except Exception:
+            discovery_errors = {"claude": SOURCE_RETRY_MESSAGE, "codex": SOURCE_RETRY_MESSAGE}
+            self._sync(None, now, SOURCE_RETRY_MESSAGE)
+        self._refresh_usage(now)
         for list_id in ids:
-            raw = self.source.state(list_id, now)
-            if raw is None:
-                self.models.pop(list_id, None)
+            try:
+                self.liveness_states[list_id] = self.source.liveness(list_id, now)
+            except Exception:
+                self.liveness_states[list_id] = unknown_liveness(now)
+            try:
+                self.native_states[list_id] = self.source.runtime(list_id, now)
+            except Exception:
+                self.native_states[list_id] = {}
+            provider = "codex" if list_id.startswith(CODEX_PREFIX) else "claude"
+            if provider in discovery_errors:
+                self._sync(list_id, now, SOURCE_RETRY_MESSAGE)
                 continue
-            freshness = assess(raw["tasks"], parse_time(raw["transcriptUpdatedAt"]), now)
-            digest = fingerprint({"source": raw, "freshness": _verdict(freshness)})
-            previous = self.models.get(list_id)
-            if fresh_projection or previous is None or previous[0] != digest:
-                projection = project(raw["tasks"], now)
-                model = {**raw, **projection, "freshness": freshness, "observedAt": now.isoformat(),
-                         "warnings": raw["warnings"] + projection["warnings"]}
-                self.models[list_id] = (digest, model)
+            try:
+                raw = self.source.state(list_id, now)
+                if raw is None:
+                    self.models.pop(list_id, None)
+                    self.sync_states.pop(list_id, None)
+                    self.liveness_states.pop(list_id, None)
+                    self.runtime_states.pop(list_id, None)
+                    self.native_states.pop(list_id, None)
+                    if self.background_session == list_id:
+                        self.background_session = None
+                    continue
+                if any(not task.get("readable", True) for task in raw["tasks"]):
+                    raise _SourceUnavailable()
+                runtime = raw.pop("_runtime", {})
+                self.runtime_states[list_id] = runtime
+                freshness = assess(raw["tasks"] if provider == "claude" else [],
+                                   parse_time(raw["transcriptUpdatedAt"]), now)
+                digest = fingerprint({"source": raw, "runtime": runtime, "freshness": _verdict(freshness),
+                                      "usage": self.usage_model[0] if self.usage_model else None})
+                previous = self.models.get(list_id)
+                if (fresh_projection or previous is None or previous[0] != digest
+                        or previous[1].get("quotaConstrained")):
+                    projection = project(raw["tasks"], now, provider=raw.get("provider"),
+                                         usage=self.usage_model[1] if self.usage_model else None)
+                    if projection.get("quotaConstrained"):
+                        digest = fingerprint({"input": digest, "projection": projection})
+                    if fresh_projection or previous is None or previous[0] != digest:
+                        model = {**raw, **projection, "freshness": freshness, "observedAt": now.isoformat(),
+                                 "warnings": raw["warnings"] + projection["warnings"]}
+                        self.models[list_id] = (digest, model)
+                self._sync(list_id, now)
+            except Exception:
+                self._sync(list_id, now, SOURCE_RETRY_MESSAGE)
+
+    def _refresh_usage(self, now):
+        try:
+            model = self.source.usage(now)
+            self.usage_model = (fingerprint(model), model)
+        except Exception:
+            pass
+
+    def usage(self):
+        """Read quota data without starting a background worker."""
+        with self.condition:
+            self._refresh_usage(datetime.now(timezone.utc))
+            if self.usage_model is None:
+                raise _SourceUnavailable()
+            return self.usage_model[1]
 
     def lists(self):
         """Read the session index on an explicit request."""
         with self.condition:
-            self.list_model = self.source.lists()
+            now = datetime.now(timezone.utc)
+            try:
+                self.list_model = self.source.lists()
+                self._sync(None, now, SOURCE_RETRY_MESSAGE if self.source.discovery_errors else None)
+            except Exception:
+                self._sync(None, now, SOURCE_RETRY_MESSAGE)
             return self.list_model
 
     def state(self, list_id):
         """Read and project one session, returning None if it no longer exists."""
         with self.condition:
             self._refresh([list_id], fresh_projection=True)
-            snapshot = self.models.get(list_id)
+            snapshot = self._snapshot(list_id)
+            if snapshot is None and self.sync_states.get(list_id, {}).get("error"):
+                raise _SourceUnavailable()
+            if snapshot:
+                self.background_session = list_id
+                self.background_until = time.monotonic() + BACKGROUND_SESSION_SECONDS
+                self._start_worker_locked()
             return snapshot[1] if snapshot else None
 
     @contextmanager
-    def watch(self, list_id):
+    def watch(self, list_id=None):
         """Keep polling alive for the lifetime of one event-stream reader."""
         with self.condition:
-            self.readers[list_id] = self.readers.get(list_id, 0) + 1
-            if self.worker is None:
-                self.worker = threading.Thread(target=self._poll, daemon=True,
-                                               name="live-gantt-sources")
-                self.worker.start()
-            self.condition.notify_all()
+            if list_id is None:
+                self.usage_readers += 1
+            else:
+                self.readers[list_id] = self.readers.get(list_id, 0) + 1
+            self._start_worker_locked()
         try:
             yield
         finally:
             with self.condition:
-                self.readers[list_id] -= 1
-                if not self.readers[list_id]:
-                    del self.readers[list_id]
+                if list_id is None:
+                    self.usage_readers -= 1
+                else:
+                    self.readers[list_id] -= 1
+                    if not self.readers[list_id]:
+                        del self.readers[list_id]
                 self.condition.notify_all()
+
+    def _start_worker_locked(self):
+        if self.worker is None:
+            self.worker = threading.Thread(target=self._poll, daemon=True,
+                                           name="live-gantt-sources")
+            self.worker.start()
+        self.condition.notify_all()
 
     def _poll(self):
         with self.condition:
             deadline = time.monotonic() + self.poll_seconds
-            while self.readers and not self.stopping:
+            while (self.readers or self.usage_readers or self.background_session) and not self.stopping:
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
                     self.condition.wait(remaining)
                     continue
-                self._refresh(tuple(self.readers))
+                if self.background_session and time.monotonic() >= self.background_until:
+                    self.background_session = None
+                    continue
+                ids = tuple(dict.fromkeys((*self.readers, *([self.background_session] if self.background_session else []))))
+                self._refresh(ids)
                 self.condition.notify_all()
                 deadline = time.monotonic() + self.poll_seconds
             self.worker = None
@@ -154,13 +280,15 @@ class LocalServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, root, port, poll_seconds, heartbeat_seconds):
-        self.monitor = Monitor(SourceStore(root), poll_seconds, heartbeat_seconds)
+    def __init__(self, root, port, poll_seconds, heartbeat_seconds, *, codex_root=None, usage_root=None):
+        self.monitor = Monitor(ProviderStore(root, codex_root=codex_root, usage_root=usage_root),
+                               poll_seconds, heartbeat_seconds)
         super().__init__((LOOPBACK, port), Handler)
 
     def server_close(self):
-        """Release listeners and finish demand-driven polling."""
+        """Release listeners and stop source synchronization."""
         self.monitor.close()
+        self.monitor.source.close()
         super().server_close()
 
 
@@ -197,11 +325,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         """Return asset and API headers without streaming a response body."""
-        self._get(head=True)
+        self._serve(head=True)
 
     def do_GET(self):
         """Dispatch the fixed read-only routes."""
-        self._get(head=False)
+        self._serve(head=False)
+
+    def _serve(self, head):
+        try:
+            self._get(head)
+        except _SourceUnavailable:
+            self.send_error(503, "Source temporarily unavailable; retrying")
 
     def _send(self, payload, content_type, head):
         self.send_response(200)
@@ -221,6 +355,16 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/lists":
             self._send(encode_json({"lists": self.server.monitor.lists()}),
                        "application/json; charset=utf-8", head)
+        elif url.path == "/api/usage":
+            self._send(encode_json(self.server.monitor.usage()),
+                       "application/json; charset=utf-8", head)
+        elif url.path == "/events/usage":
+            self.server.monitor.lists()
+            self.server.monitor.usage()
+            if head:
+                self._send(b"", "text/event-stream", head)
+            else:
+                self._events(None)
         elif url.path in {"/api/state", "/events"}:
             values = parse_qs(url.query).get("list", [])
             if len(values) != 1 or not LIST_ID.fullmatch(values[0]):
@@ -253,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         monitor = self.server.monitor
-        last_state = last_lists = None
+        last_state = last_lists = last_usage = None
         heartbeat = time.monotonic() + monitor.heartbeat_seconds
         self.close_connection = True
         try:
@@ -261,7 +405,8 @@ class Handler(BaseHTTPRequestHandler):
                 while not monitor.stopping and not self._disconnected():
                     with monitor.condition:
                         lists = monitor.list_model
-                        snapshot = monitor.models.get(list_id)
+                        snapshot = monitor._snapshot(list_id)
+                        usage = monitor.usage_model
                     lists_digest = fingerprint(lists)
                     if lists_digest != last_lists:
                         self._event("lists", {"lists": lists})
@@ -272,10 +417,16 @@ class Handler(BaseHTTPRequestHandler):
                     elif snapshot is None and last_state is not None:
                         self._event("missing", {"id": list_id})
                         break
+                    if usage and usage[0] != last_usage:
+                        self._event("usage", usage[1])
+                        last_usage = usage[0]
                     remaining = heartbeat - time.monotonic()
                     if remaining <= 0:
                         self.wfile.write(b": heartbeat\n\n")
-                        self._event("heartbeat", {"observedAt": datetime.now(timezone.utc).isoformat()})
+                        self._event("heartbeat", {"observedAt": datetime.now(timezone.utc).isoformat(),
+                                                  "sync": monitor.sync(list_id),
+                                                  "liveness": monitor.liveness_states.get(list_id),
+                                                  "monitor": snapshot[1]["monitor"] if snapshot else None})
                         heartbeat = time.monotonic() + monitor.heartbeat_seconds
                     with monitor.condition:
                         monitor.condition.wait(min(monitor.poll_seconds,
@@ -285,6 +436,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(root, port=DEFAULT_PORT, *, poll_seconds=POLL_SECONDS,
-                heartbeat_seconds=HEARTBEAT_SECONDS):
+                heartbeat_seconds=HEARTBEAT_SECONDS, codex_root=None, usage_root=None):
     """Create an unstarted server bound exclusively to IPv4 loopback."""
-    return LocalServer(Path(root), port, poll_seconds, heartbeat_seconds)
+    return LocalServer(Path(root), port, poll_seconds, heartbeat_seconds,
+                       codex_root=codex_root, usage_root=usage_root)

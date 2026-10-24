@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,12 @@ PACKAGE_DIRECTORY = "live_gantt"
 VERSION_FILENAME = "version"
 INSTALLATION_SETTINGS_FILENAME = "installation.json"
 SOURCE_ROOT_VARIABLE = "CLAUDE_CONFIG_DIR"
+SOURCE_ROOT_VARIABLES = (SOURCE_ROOT_VARIABLE, "CODEX_HOME")
+CODEX_COMMAND_VARIABLE = "LIVE_GANTT_CODEX_BIN"
 OWNER_READ_WRITE = 0o600
+OWNER_EXECUTABLE = 0o700
+CODEX_LAUNCHER_PATH = Path(".local/bin/live-gantt-codex")
+CODEX_LAUNCHER_HEADER = "#!/bin/sh\n# Managed by live-gantt: codex launcher v1\n"
 LAUNCHD_TEMPLATE = Path("launchd/local.live-gantt.plist")
 SYSTEMD_TEMPLATE = Path("systemd/live-gantt.service")
 BOOTOUT_POLL_SECONDS = 0.1
@@ -42,11 +48,16 @@ def installation_directory(system, home, environ):
 
 
 def installation_settings(environ, previous):
-    """Preserve the installed source root unless the installer receives an explicit replacement."""
-    source_root = environ.get(SOURCE_ROOT_VARIABLE, previous.get(SOURCE_ROOT_VARIABLE))
-    if not isinstance(source_root, str) or not source_root:
-        return {}
-    return {SOURCE_ROOT_VARIABLE: str(Path(source_root).expanduser().resolve())}
+    """Preserve installed source roots and the native Codex command unless explicitly replaced."""
+    settings = {}
+    for variable in SOURCE_ROOT_VARIABLES:
+        source_root = environ.get(variable, previous.get(variable))
+        if isinstance(source_root, str) and source_root:
+            settings[variable] = str(Path(source_root).expanduser().resolve())
+    executable = environ.get(CODEX_COMMAND_VARIABLE, previous.get(CODEX_COMMAND_VARIABLE))
+    if isinstance(executable, str) and executable:
+        settings[CODEX_COMMAND_VARIABLE] = str(Path(executable).expanduser().absolute())
+    return settings
 
 
 def launchd_configuration(plugin_root, directory, python, log, settings):
@@ -137,6 +148,38 @@ def service_python(which, executable):
     return Path(found) if found and supported(found) else Path(executable)
 
 
+def _owns_codex_launcher(target):
+    if target.is_symlink() or not target.is_file():
+        return False
+    header = CODEX_LAUNCHER_HEADER.encode("utf-8")
+    with target.open("rb") as stream:
+        return stream.read(len(header)) == header
+
+
+def _validate_codex_launcher(target):
+    if target.is_symlink() or target.exists():
+        if not _owns_codex_launcher(target):
+            raise FileExistsError(f"Refusing to replace existing command: {target}")
+
+
+def _write_codex_launcher(target, directory, python):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    command = (
+        f"PYTHONPATH={shlex.quote(str(directory))} "
+        f"exec {shlex.quote(str(python))} -B -P -m live_gantt.codex_launcher \"$@\"\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", prefix=f".{target.name}-",
+                                     dir=target.parent, delete=False) as stream:
+        staged = Path(stream.name)
+        stream.write(CODEX_LAUNCHER_HEADER + command)
+    try:
+        staged.chmod(OWNER_EXECUTABLE)
+        _validate_codex_launcher(target)
+        staged.replace(target)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def install(plugin_root):
     """Copy this plugin's package into stable storage and restart its per-user service."""
     system = platform.system()
@@ -147,6 +190,8 @@ def install(plugin_root):
     settings = installation_settings(os.environ, _read_settings(directory))
     identifier, target = _service_target(system, plugin_root, home, os.environ)
     python = service_python(shutil.which, sys.executable)
+    codex_launcher = home / CODEX_LAUNCHER_PATH
+    _validate_codex_launcher(codex_launcher)
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".install-", dir=directory) as staging:
         staged_package = Path(staging) / PACKAGE_DIRECTORY
@@ -171,6 +216,7 @@ def install(plugin_root):
         settings_path = directory / INSTALLATION_SETTINGS_FILENAME
         settings_path.write_text(json.dumps(settings) + "\n")
         settings_path.chmod(OWNER_READ_WRITE)
+        _write_codex_launcher(codex_launcher, directory, python)
         if system == "Darwin":
             subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(target)], check=True)
         else:
@@ -200,6 +246,9 @@ def uninstall(plugin_root):
         shutil.rmtree(package)
     for name in (VERSION_FILENAME, INSTALLATION_SETTINGS_FILENAME):
         (directory / name).unlink(missing_ok=True)
+    codex_launcher = home / CODEX_LAUNCHER_PATH
+    if _owns_codex_launcher(codex_launcher):
+        codex_launcher.unlink()
     if directory.is_dir() and not any(directory.iterdir()):
         directory.rmdir()
 
