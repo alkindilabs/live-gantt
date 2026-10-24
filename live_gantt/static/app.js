@@ -12,6 +12,18 @@ const PAST_SHARE = 0.25;
 const FOLLOW_REBASE_INTERVAL = 30 * SECOND;
 const CONNECTION_STALE_AFTER = 40 * SECOND;
 const DISCOVERY_RETRY_DELAY = 3 * SECOND;
+const REQUEST_TIMEOUT = 10 * SECOND;
+const MAX_MONITOR_ISSUES = 8;
+const MAX_MONITOR_TEXT = 500;
+const MONITOR_LABELS = {
+  working: "Working",
+  needs_you: "Needs you",
+  waiting_for_quota: "Waiting for quota",
+  idle: "Idle",
+  plan_complete: "Plan complete",
+  attention: "Needs attention",
+  unverified: "Unable to verify",
+};
 const MINIMUM_PLOT_WIDTH = 540;
 const MINIMUM_BAR_WIDTH = 3;
 const BAR_LABEL_GAP = 7;
@@ -22,6 +34,7 @@ const EXPANDED_STORAGE_KEY = "live-gantt.expanded";
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
 const SESSION_HASH_PREFIX = "#session=";
+const RECENT_PICKER_SESSIONS = 10;
 const MAX_LISTED_SESSIONS = 200;
 const OPTION_PAGE_STEP = 8;
 const PROJECT_PATH_SEGMENTS = 2;
@@ -53,10 +66,15 @@ function savedExpanded() {
 }
 
 const elements = Object.fromEntries(
-  ["session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
+  usage: null,
+  usageAges: [],
+  usageForecasts: [],
+  usagePaceHeadings: [],
+  pageInactive: false,
   lists: [],
   selected: null,
   stream: null,
@@ -68,6 +86,12 @@ const state = {
   follow: true,
   connected: false,
   lastReceived: null,
+  streamStarted: null,
+  reconnectTimer: null,
+  sync: null,
+  liveness: null,
+  monitor: null,
+  monitorReceivedAt: null,
   range: null,
   plotWidth: MINIMUM_PLOT_WIDTH,
   lastRebase: 0,
@@ -136,9 +160,47 @@ function modelAge(now) {
   return Math.max(0, now - (timestamp(state.model?.observedAt) ?? now));
 }
 
-function projectedTime(value, now) {
+function projectedTime(value, now, anchored = false) {
   const result = timestamp(value);
-  return result === null ? null : result + modelAge(now);
+  return result === null ? null : result + (anchored ? 0 : modelAge(now));
+}
+
+function taskSegments(task, now) {
+  const anchored = task.projectionAnchored === true;
+  const explicit = Array.isArray(task.projectedSegments);
+  const segments = explicit ? task.projectedSegments : [{
+    start: task.projectedStart,
+    end: task.projectedEnd,
+  }];
+  return segments.filter(segment => segment && typeof segment === "object").map(segment => ({
+    start: task.status === "in_progress" && !explicit
+      ? now : projectedTime(segment.start, now, anchored),
+    end: projectedTime(segment.end, now, anchored),
+  })).filter(segment => segment.start !== null && segment.end !== null && segment.end >= segment.start);
+}
+
+function taskQuotaDelays(task) {
+  return (Array.isArray(task.quotaDelays) ? task.quotaDelays : [])
+    .filter(delay => delay && typeof delay === "object" && (delay.end == null || timestamp(delay.end) !== null))
+    .map(delay => ({
+    ...delay, start: timestamp(delay.start), end: timestamp(delay.end),
+    })).filter(delay => delay.start !== null && (delay.end === null || delay.end >= delay.start));
+}
+
+function currentQuotaDelay(task, now) {
+  return task.status === "completed" ? null : taskQuotaDelays(task).find(delay =>
+    delay.start <= now && (delay.end === null || now < delay.end));
+}
+
+function quotaDelayDescription(delay) {
+  const reason = delay.reason === "predicted" ? "Projected quota exhaustion" : "Quota limit reached";
+  const resume = delay.end === null ? "Resume time unavailable" : `Resume ${dateTime(delay.end)}`;
+  return `${providerName(delay.provider)} · ${resume} · ${reason}`;
+}
+
+function taskDescription(task, now = Date.now()) {
+  const delay = currentQuotaDelay(task, now);
+  return taskSubtitle(task, now) + (delay ? ` · ${quotaDelayDescription(delay)}` : "");
 }
 
 function setNotice(message) {
@@ -169,8 +231,12 @@ function sessionIdentity(list) {
   return { ...list, title, prompt, project };
 }
 
+function providerName(provider) {
+  return provider === "codex" ? "Codex" : provider === "claude" ? "Claude Code" : "Unknown provider";
+}
+
 function renderFacts(container, list, now) {
-  const facts = [list.active ? node("span", "session-active", "Active") : node("span", "", elapsedLabel(list.updatedAt, now))];
+  const facts = [node("span", "provider-label", providerName(list.provider)), list.active ? node("span", "session-active", "Active") : node("span", "", elapsedLabel(list.updatedAt, now))];
   const project = shortProject(list.project);
   if (project) facts.push(node("span", "", project));
   const work = [list.taskCount && plural(list.taskCount, "task"), list.agentCount && plural(list.agentCount, "agent")].filter(Boolean);
@@ -197,11 +263,15 @@ function optionId(id) {
   return `session-option-${id}`;
 }
 
+function isWorkSession(list) {
+  return list.chartable && !list.headless;
+}
+
 function pickerSessions() {
   const words = elements["session-filter"].value.toLowerCase().split(/\s+/).filter(Boolean);
   return state.lists.map(sessionIdentity).filter(list => {
-    if (!state.pickerAll && !list.chartable && list.id !== state.selected) return false;
-    const text = [list.title, list.prompt, list.project, list.id].join(" ").toLowerCase();
+    if (!state.pickerAll && !isWorkSession(list) && list.id !== state.selected) return false;
+    const text = [list.title, list.prompt, list.project, list.id, providerName(list.provider)].join(" ").toLowerCase();
     return words.every(word => text.includes(word));
   });
 }
@@ -221,19 +291,18 @@ function sessionOption(list, now) {
   return option;
 }
 
-function pickerSummary(matching, shown) {
+function pickerSummary(matching, shown, compact) {
   const parts = [];
-  if (shown < matching) parts.push(`Showing ${shown} of ${matching}; type to narrow.`);
-  if (!state.pickerAll) {
-    const hidden = state.lists.filter(list => !list.chartable && list.id !== state.selected).length;
-    if (hidden) parts.push(`${plural(hidden, "session")} without tasks or agents hidden.`);
-  }
+  if (shown < matching) parts.push(`Showing ${shown} of ${matching}; ${compact ? "search or choose All sessions" : "type to narrow"}.`);
+  if (!state.pickerAll) parts.push("Background runs and other chats are in All sessions.");
   return parts.join(" ") || `${plural(matching, "session")}.`;
 }
 
 function renderOptions() {
   const matching = pickerSessions();
-  const shown = matching.slice(0, MAX_LISTED_SESSIONS);
+  const compact = !state.pickerAll && !elements["session-filter"].value.trim();
+  const limit = compact ? RECENT_PICKER_SESSIONS : MAX_LISTED_SESSIONS;
+  const shown = matching.filter((list, index) => index < limit || (compact && list.id === state.selected));
   state.pickerShown = shown.map(list => list.id);
   if (!state.pickerShown.includes(state.pickerActive)) {
     state.pickerActive = state.pickerShown.includes(state.selected) ? state.selected : state.pickerShown[0] ?? null;
@@ -245,7 +314,7 @@ function renderOptions() {
     empty.setAttribute("role", "presentation");
     elements["session-options"].append(empty);
   }
-  elements["session-summary"].textContent = pickerSummary(matching.length, shown.length);
+  elements["session-summary"].textContent = pickerSummary(matching.length, shown.length, compact);
   renderActiveOption(false);
 }
 
@@ -312,14 +381,51 @@ function linkedSession() {
   }
 }
 
+function preferredSession() {
+  return linkedSession() || state.lists.find(isWorkSession)?.id || null;
+}
+
 function linkSession(id) {
   const address = id === null ? `${location.pathname}${location.search}` : `${SESSION_HASH_PREFIX}${encodeURIComponent(id)}`;
   if (linkedSession() !== id) history.replaceState(null, "", address);
 }
 
 function closeStream() {
+  window.clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
   if (state.stream) state.stream.close();
   state.stream = null;
+  state.connected = false;
+}
+
+function readLocal(url) {
+  return fetch(url, { cache: "no-store", signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
+}
+
+function recoverStream() {
+  closeStream();
+  renderConnection();
+  if (document.hidden || state.pageInactive) return;
+  state.reconnectTimer = window.setTimeout(async () => {
+    const attempt = state.reconnectTimer;
+    try {
+      const response = await readLocal("/api/lists");
+      if (response.ok) {
+        const { lists } = await response.json();
+        if (state.reconnectTimer !== attempt) return;
+        renderLists(lists);
+        if (state.selected && !state.lists.some(list => list.id === state.selected)) {
+          const selected = await readLocal(`/api/state?list=${encodeURIComponent(state.selected)}`);
+          if (state.reconnectTimer !== attempt) return;
+          if (selected.status === 400 || selected.status === 404) {
+            selectSession(state.lists.find(isWorkSession)?.id ?? null);
+            return;
+          }
+        }
+      }
+    } catch {}
+    if (state.reconnectTimer === attempt) connectStream();
+  }, DISCOVERY_RETRY_DELAY);
 }
 
 function markReceived() {
@@ -331,11 +437,61 @@ function markReceived() {
 function renderConnection() {
   const age = state.lastReceived === null ? null : Math.max(0, Math.floor((Date.now() - state.lastReceived) / SECOND));
   const live = state.connected && age !== null && age * SECOND < CONNECTION_STALE_AFTER;
-  elements.connection.classList.toggle("disconnected", !live);
-  const label = live ? "Live" : "Disconnected";
+  const checked = timestamp(state.sync?.checkedAt);
+  const current = live && state.sync?.status === "current" && checked !== null && Date.now() - checked < CONNECTION_STALE_AFTER;
+  elements.connection.classList.toggle("disconnected", !current);
+  const label = !live ? "Disconnected" : current ? "Synced" : state.sync?.status === "retrying" ? "Retrying" : "Connecting";
   if (elements["connection-text"].textContent !== label) elements["connection-text"].textContent = label;
-  elements["connection-age"].textContent = live ? `${age}s ago` : "";
-  renderForecastHealth(live);
+  elements["connection-age"].textContent = checked === null ? "" : `${Math.max(0, Math.floor((Date.now() - checked) / SECOND))}s ago`;
+  elements.connection.title = `${checked === null ? "No successful source read yet." : `Last successful source read: ${dateTime(checked, true)}.`} ${state.sync?.error || "Local session files are checked every two seconds."}`;
+  renderHarnessHealth(live);
+  renderForecastHealth();
+  renderMonitor(live);
+}
+
+function receiveMonitor(monitor) {
+  if (!monitor || !Object.hasOwn(MONITOR_LABELS, monitor.state) || typeof monitor.summary !== "string"
+      || !Array.isArray(monitor.issues) || !monitor.issues.every(issue => typeof issue === "string")
+      || !(monitor.lastActivityAt === null || typeof monitor.lastActivityAt === "string"
+        && timestamp(monitor.lastActivityAt) !== null)) return;
+  state.monitor = {
+    state: monitor.state,
+    summary: monitor.summary.slice(0, MAX_MONITOR_TEXT),
+    lastActivityAt: monitor.lastActivityAt,
+    issues: monitor.issues.slice(0, MAX_MONITOR_ISSUES).map(issue => issue.slice(0, MAX_MONITOR_TEXT)),
+  };
+  state.monitorReceivedAt = Date.now();
+}
+
+function renderMonitor(connected) {
+  const current = state.monitor;
+  const age = state.monitorReceivedAt === null ? null : Date.now() - state.monitorReceivedAt;
+  const verified = connected && current !== null && age !== null && age >= 0 && age < CONNECTION_STALE_AFTER;
+  const status = verified ? current.state : "unverified";
+  elements["monitor-status"].hidden = state.selected === null;
+  elements["monitor-status"].dataset.state = status;
+  const summary = verified ? current.summary : !connected
+    ? "Connection lost. Reconnecting automatically."
+    : age === null ? "Waiting for current session evidence."
+    : "Session evidence expired. Waiting for a fresh monitor update.";
+  for (const [id, text] of [["monitor-title", MONITOR_LABELS[status]], ["monitor-summary", summary]]) {
+    if (elements[id].textContent !== text) elements[id].textContent = text;
+  }
+  elements["monitor-summary"].title = summary;
+  const activity = timestamp(current?.lastActivityAt);
+  elements["monitor-activity"].textContent = activity !== null && activity <= Date.now()
+    ? `Last activity ${elapsedLabel(current.lastActivityAt, Date.now())}` : "No verified activity time";
+  const lastKnown = elements["monitor-last-known"];
+  lastKnown.hidden = verified || current === null;
+  lastKnown.textContent = current === null ? "" : `Last reported: ${MONITOR_LABELS[current.state]}. ${current.summary}`;
+  const issues = current?.issues || [];
+  const issueList = elements["monitor-issues"];
+  const content = JSON.stringify(issues);
+  issueList.hidden = !issues.length;
+  if (issueList.dataset.content !== content) {
+    issueList.dataset.content = content;
+    issueList.replaceChildren(...issues.map(issue => node("li", "", issue)));
+  }
 }
 
 function parseEvent(event, receive) {
@@ -343,100 +499,291 @@ function parseEvent(event, receive) {
     receive(JSON.parse(event.data));
     markReceived();
   } catch {
-    setNotice("An update could not be read. Waiting for the next update.");
+    setNotice("An update could not be read. Reconnecting for a fresh snapshot.");
+    recoverStream();
   }
 }
 
-function selectSession(id) {
-  closeStream();
+function resetSession(id) {
+  const hadSelection = state.selected !== null;
   state.selected = id;
-  linkSession(id);
+  if (id !== null || hadSelection) linkSession(id);
   state.model = null;
-  state.connected = false;
-  state.lastReceived = null;
+  state.monitor = null;
+  state.monitorReceivedAt = null;
   state.follow = true;
+  state.range = null;
   state.detailsOpen = false;
   elements.details.hidden = true;
   elements["timeline-content"].replaceChildren();
   elements.milestones.replaceChildren();
   elements.overview.hidden = true;
+  elements["session-tokens"].hidden = true;
   renderFreshness(null);
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
-  elements.project.textContent = shortProject(state.lists.find(list => list.id === id)?.project) || "Claude Code sessions";
+  elements.project.textContent = shortProject(state.lists.find(list => list.id === id)?.project) || "Claude Code and Codex sessions";
+  elements.project.title = "";
   elements["session-heading"].hidden = true;
+  document.title = "Live Gantt";
   renderPicker();
   if (pickerOpen()) renderOptions();
   renderFollow();
+}
+
+function selectSession(id) {
+  resetSession(id);
+  setNotice(id ? "Reading session…" : "No sessions with recorded work. Waiting for local activity.");
+  connectStream();
+}
+
+function connectStream() {
+  closeStream();
+  state.connected = false;
+  state.lastReceived = null;
+  state.sync = null;
+  state.liveness = null;
+  state.monitorReceivedAt = null;
+  state.streamStarted = Date.now();
   renderConnection();
-  setNotice("Reading session…");
-  const stream = new EventSource(`/events?list=${encodeURIComponent(id)}`);
+  if (document.hidden || state.pageInactive) return;
+  const id = state.selected;
+  const stream = new EventSource(id ? `/events?list=${encodeURIComponent(id)}` : "/events/usage");
   state.stream = stream;
   stream.addEventListener("state", event => {
-    if (state.stream !== stream) return;
+    if (state.stream !== stream || !id) return;
     parseEvent(event, model => {
       state.model = model;
+      state.sync = model.sync;
+      state.liveness = model.liveness;
+      receiveMonitor(model.monitor);
       renderLists(state.lists);
       renderModel();
     });
   });
+  stream.addEventListener("usage", event => {
+    if (state.stream === stream) parseEvent(event, renderUsage);
+  });
   stream.addEventListener("lists", event => {
-    if (state.stream === stream) parseEvent(event, data => renderLists(data.lists));
+    if (state.stream !== stream) return;
+    parseEvent(event, data => {
+      renderLists(data.lists);
+      if (!state.selected) {
+        const next = preferredSession();
+        if (next) selectSession(next);
+      }
+    });
   });
   stream.addEventListener("heartbeat", event => {
-    if (state.stream === stream) parseEvent(event, () => {});
+    if (state.stream === stream) parseEvent(event, data => {
+      state.sync = data.sync;
+      state.liveness = data.liveness;
+      receiveMonitor(data.monitor);
+    });
   });
   stream.addEventListener("missing", () => {
     if (state.stream !== stream) return;
     renderLists(state.lists.filter(list => list.id !== id));
-    const next = state.lists.find(list => list.chartable);
-    if (next) {
-      selectSession(next.id);
-      return;
-    }
-    closeStream();
-    state.model = null;
-    state.selected = null;
-    document.title = "Live Gantt";
-    elements.project.textContent = "Claude Code sessions";
-    elements.project.title = "";
-    linkSession(null);
-    renderPicker();
-    state.connected = false;
-    state.detailsOpen = false;
-    elements.details.hidden = true;
-    elements["timeline-content"].replaceChildren();
-    elements.milestones.replaceChildren();
-    elements.overview.hidden = true;
-    elements["session-heading"].hidden = true;
-    renderFreshness(null);
-    elements["task-count"].textContent = "";
-    elements.warnings.hidden = true;
-    renderConnection();
-    setNotice(state.lists.length
-      ? "This session is no longer available. Choose All sessions in the session picker to open another."
-      : "This session is no longer available. Start a session with tasks, then refresh this page.");
+    const next = state.lists.find(isWorkSession);
+    selectSession(next?.id ?? null);
+    if (!next) setNotice("This session is no longer available. Waiting for local activity; use All sessions to open another.");
   });
   stream.onopen = () => {
     if (state.stream === stream) markReceived();
   };
   stream.onerror = () => {
-    if (state.stream === stream) {
-      state.connected = false;
-      renderConnection();
-      if (!state.model) setNotice("Disconnected. Reconnecting to the local server…");
-    }
+    if (state.stream !== stream) return;
+    state.connected = false;
+    renderConnection();
+    if (id && !state.model) setNotice("Disconnected. Reconnecting to the local server…");
+    if (stream.readyState === EventSource.CLOSED) recoverStream();
   };
+}
+
+function usageForecastPassed(window, now) {
+  const exhaustion = timestamp(window.forecast?.exhaustsAt);
+  return window.forecast?.status === "predicted" && exhaustion !== null && exhaustion <= now;
+}
+
+function usageForecast(window, now) {
+  const forecast = window.forecast || {};
+  const exhaustion = timestamp(forecast.exhaustsAt);
+  if (window.stale || forecast.status === "stale") return "Stale; no current estimate";
+  if (forecast.status === "reached") return "Limit reached";
+  if (forecast.status === "predicted" && exhaustion !== null) return usageForecastPassed(window, now)
+    ? "Awaiting fresh usage" : `Runs out ${forecastTime(exhaustion, now)}`;
+  if (forecast.status === "resets_first") return "Reset comes first";
+  if (forecast.status === "insufficient_history") return "Collecting history";
+  if (forecast.status === "no_observed_pace") return "No increase observed";
+  return "Estimate unavailable";
+}
+
+function usagePaceTooltip(window, now) {
+  const forecast = window.forecast || {};
+  if (window.stale || forecast.status === "stale") return "Observation window unavailable: usage is stale.";
+  const passed = usageForecastPassed(window, now);
+  if (forecast.basis === "provider") return passed ? "Previous provider estimate has passed; awaiting fresh usage."
+    : "Forecast supplied by provider; no local observation window used.";
+  const seconds = forecast.sampleSeconds;
+  if (forecast.basis !== "recorded_changes" || typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return passed
+    ? "Estimate time has passed; awaiting fresh usage." : "Observation window unavailable.";
+  const roundedSeconds = Math.round(seconds);
+  const minutes = Math.floor(roundedSeconds * SECOND / MINUTE);
+  const remainder = roundedSeconds - minutes * MINUTE / SECOND;
+  const span = [minutes ? `${minutes} min` : "", remainder ? `${remainder} sec` : ""].filter(Boolean).join(" ");
+  return `${passed ? "Previous estimate" : "At current pace"}, based on ${span || "less than 1 sec"} of observed usage.${passed ? " Awaiting fresh usage." : ""}`;
+}
+
+function paintUsageForecasts(now) {
+  for (const { field, window } of state.usageForecasts) {
+    field.firstElementChild.textContent = usageForecast(window, now);
+    field.title = usagePaceTooltip(window, now);
+    field.classList.toggle("is-warning", Boolean(window.stale || window.forecast?.status === "stale"
+      || window.forecast?.status === "reached" || usageForecastPassed(window, now)));
+  }
+  for (const { field, windows } of state.usagePaceHeadings) {
+    field.title = windows.map(window => `${window.label || "Usage window"}: ${usagePaceTooltip(window, now)}`).join("\n");
+  }
+}
+
+function addUsageAge(container, label, value, now) {
+  const field = node("span");
+  container.append(field);
+  state.usageAges.push({ field, label, value });
+  field.textContent = `${label}: ${elapsedLabel(value, now)}`;
+  field.title = dateTime(value, true);
+}
+
+function renderUsage(data) {
+  state.usage = data;
+  state.usageAges = [];
+  state.usageForecasts = [];
+  state.usagePaceHeadings = [];
+  const now = Date.now();
+  const providers = Array.isArray(data?.providers) ? data.providers : [];
+  const openProviders = new Set([...elements["usage-providers"].querySelectorAll("details[open]")].map(details => details.dataset.provider));
+  const providerScroll = new Map([...elements["usage-providers"].querySelectorAll("details[open]")].map(details => [details.dataset.provider, details.querySelector(".disclosure-content").scrollTop]));
+  const focusedProvider = document.activeElement?.closest(".usage-details")?.dataset.provider;
+  elements["usage-providers"].replaceChildren();
+  for (const provider of providers) {
+    const windows = Array.isArray(provider.windows) ? provider.windows : [];
+    const card = node("article", "usage-provider");
+    const heading = node("div", "usage-provider-heading");
+    heading.append(node("h3", "", providerName(provider.provider)));
+    const status = provider.status === "available" ? "Recorded locally" : provider.status === "stale" ? "Stale" : "Unavailable";
+    heading.append(node("span", `usage-status ${provider.status === "stale" ? "is-stale" : ""}`, status));
+    card.append(heading);
+    const disclosure = node("details", "compact-disclosure usage-details");
+    disclosure.dataset.provider = provider.provider;
+    disclosure.append(node("summary", "", "Details"));
+    const provenance = node("div", "disclosure-content");
+    disclosure.append(provenance);
+    const columns = node("div", "usage-columns");
+    for (const label of ["Window", "Used", "Resets"]) columns.append(node("span", "", label));
+    const outlook = node("span", "", "Exhaustion ");
+    const pace = node("span", "usage-pace", "at current pace");
+    state.usagePaceHeadings.push({ field: pace, windows });
+    outlook.append(pace);
+    columns.append(outlook);
+    if (provider.message) {
+      const message = node("p", "usage-message", provider.message);
+      if (provider.status === "available") provenance.append(message);
+      else card.append(message);
+    }
+    if (windows.length) card.append(columns);
+    for (const window of windows) {
+      const section = node("section", "usage-window");
+      const title = node("div", "usage-window-heading");
+      title.append(node("h4", "", window.label || "Usage window"));
+      if (window.stale) title.append(node("span", "usage-status is-stale", "Stale"));
+      section.append(title);
+      const known = typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent);
+      const amount = node("div", "usage-amount");
+      amount.append(node("strong", "usage-percent", known ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(window.usedPercent)}%` : "Unknown"));
+      if (known) {
+        const meter = node("progress", "usage-meter");
+        meter.max = PERCENT_SCALE;
+        meter.value = window.usedPercent;
+        meter.setAttribute("aria-label", `${providerName(provider.provider)}, ${window.label || "usage window"}: ${window.usedPercent}% used`);
+        amount.append(meter);
+      }
+      section.append(amount);
+      const reset = timestamp(window.resetsAt);
+      section.append(node("p", "usage-reset", reset === null ? "Unknown" : forecastTime(reset, now)));
+      const forecast = node("div", "usage-forecast");
+      const basis = window.forecast?.basis;
+      forecast.append(node("p"));
+      state.usageForecasts.push({ field: forecast, window });
+      section.append(forecast);
+      const ages = node("div", "usage-ages");
+      ages.append(node("strong", "", window.label || "Usage window"));
+      ages.append(node("span", "", basis === "provider" ? "Forecast supplied by provider" : basis === "recorded_changes" ? "Forecast estimated from observed usage over time" : "No recorded forecast basis"));
+      ages.append(node("span", "", "No increase observed means there is no exhaustion estimate; collecting history requires more observations."));
+      if (timestamp(window.capturedAt) !== null) addUsageAge(ages, "Captured locally", window.capturedAt, now);
+      else ages.append(node("span", "", "Local capture time unknown"));
+      if (timestamp(window.measuredAt) !== null) addUsageAge(ages, "Provider measurement", window.measuredAt, now);
+      else {
+        ages.append(node("span", "", "Provider measurement age unknown"));
+        const observation = window.observedAt || window.capturedAt;
+        if (timestamp(observation) !== null) addUsageAge(ages, "Last distinct observation", observation, now);
+      }
+      if (window.freshnessBasis === "recorded_change") ages.append(node("span", "", "Freshness follows recorded changes, not repeat captures."));
+      provenance.append(ages);
+      card.append(section);
+    }
+    if (!windows.length && !provider.message) card.append(node("p", "usage-message", "No local usage record available."));
+    if (provider.sourceId) provenance.append(node("p", "usage-source", `Source session: ${provider.sourceId}`));
+    if (windows.length || provider.sourceId) {
+      disclosure.open = openProviders.has(provider.provider);
+      card.append(disclosure);
+    }
+    elements["usage-providers"].append(card);
+    provenance.scrollTop = providerScroll.get(provider.provider) || 0;
+  }
+  if (!providers.length) elements["usage-providers"].append(node("p", "usage-empty", "Local provider usage is unavailable."));
+  paintUsageForecasts(now);
+  if (focusedProvider) {
+    const disclosure = [...elements["usage-providers"].querySelectorAll(".usage-details")].find(details => details.dataset.provider === focusedProvider);
+    disclosure?.querySelector("summary").focus({ preventScroll: true });
+  }
+}
+
+function renderTokens() {
+  const usage = state.model?.tokenUsage || {};
+  const fields = [["totalTokens", "Total"], ["inputTokens", "Input"], ["outputTokens", "Output"], ["cachedInputTokens", "Cached input"], ["cacheWriteTokens", "Cache writes"], ["reasoningOutputTokens", "Reasoning output"]];
+  elements["token-values"].replaceChildren();
+  for (const [key, label] of fields) {
+    const field = node("div");
+    const known = typeof usage[key] === "number" && Number.isFinite(usage[key]);
+    field.append(node("dt", "", label), node("dd", "", known ? new Intl.NumberFormat().format(usage[key]) : "Unknown"));
+    elements["token-values"].append(field);
+  }
+  elements["session-tokens"].hidden = false;
 }
 
 function fitRange(now) {
   const times = [now - MINIMUM_FIT_SPAN * PAST_SHARE, now + MINIMUM_FIT_SPAN * (1 - PAST_SHARE)];
-  const activities = [...(state.model?.agents || []), ...(state.model?.workflows || [])];
+  const workflows = state.model?.workflows || [];
+  const activities = [...workflows];
+  const agents = state.model?.agents || [];
+  const span = activitySpan(agents, now);
+  if (span.start !== null) times.push(span.start);
+  if (span.end !== null) times.push(span.end);
   for (const task of state.model?.tasks || []) {
-    for (const value of [timestamp(task.started), timestamp(task.ended), projectedTime(task.projectedStart, now), projectedTime(task.projectedEnd, now)]) {
+    for (const value of [timestamp(task.started), timestamp(task.ended),
+      projectedTime(task.projectedStart, now, task.projectionAnchored === true),
+      projectedTime(task.projectedEnd, now, task.projectionAnchored === true),
+      ...taskSegments(task, now).flatMap(segment => [segment.start, segment.end]),
+      ...taskQuotaDelays(task).flatMap(delay => [delay.start, delay.end])]) {
       if (value !== null) times.push(value);
     }
-    activities.push(...(task.agents || []), ...(task.runs || []));
+    const taskVisible = !isFinishedLongAgo(task, now) || state.expanded.has(expansionKey("done", task.lane, task.milestone ?? null));
+    if (taskVisible && state.expanded.has(expansionKey("task-details", task.id))) {
+      activities.push(...(task.agents || []), ...(task.runs || []));
+    }
+  }
+  for (const workflow of workflows) {
+    if (state.expanded.has(expansionKey("workflow-details", workflow.id))) activities.push(...(workflow.agents || []));
   }
   for (const activity of activities) {
     const start = timestamp(activity.started);
@@ -538,8 +885,14 @@ function showDetails(item, kind, key) {
   detailField(fields, "Lane", item.lane);
   detailField(fields, "Milestone", item.milestone);
   detailField(fields, "Progress", kind === "task" ? percent(item.effectiveProgress ?? item.progress) : undefined);
-  const expectedFinish = kind === "task" ? projectedTime(item.projectedEnd, Date.now()) : null;
+  const now = Date.now();
+  const expectedFinish = kind === "task" ? projectedTime(item.projectedEnd, now, item.projectionAnchored === true) : null;
   detailField(fields, "Expected finish", expectedFinish !== null ? dateTime(expectedFinish) : undefined);
+  if (kind === "task" && item.status !== "completed") {
+    for (const delay of taskQuotaDelays(item).filter(delay => delay.end === null || delay.end > now)) {
+      detailField(fields, delay.start <= now ? "Waiting for quota" : "Quota pause projected", quotaDelayDescription(delay));
+    }
+  }
   detailField(fields, "Last update", item.updatedAt ? dateTime(item.updatedAt, true) : undefined);
   detailField(fields, "Started", item.started ? dateTime(item.started, true) : undefined);
   detailField(fields, "Ended", item.ended ? dateTime(item.ended, true) : undefined);
@@ -583,7 +936,7 @@ function registerFocus(target, key) {
 function toggleExpanded(key) {
   if (!state.expanded.delete(key)) state.expanded.add(key);
   try { localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify([...state.expanded])); } catch {}
-  renderTimeline(Date.now());
+  renderTimeline(Date.now(), state.zoom === "fit");
 }
 
 function closeDetails(restoreFocus = true) {
@@ -613,6 +966,7 @@ function isOverrun(task, now) {
 }
 
 function taskState(task, now = Date.now()) {
+  if (currentQuotaDelay(task, now)) return "Waiting for quota";
   return isOverrun(task, now) ? "Overrun" : task.blocked ? "Blocked" : task.queued ? "Queued" : titleCase(task.status);
 }
 
@@ -638,9 +992,10 @@ function expansionKey(...parts) {
 }
 
 function renderTask(task) {
-  const finished = (task.agents || []).filter(agent => !LIVE_AGENT_STATUSES.has(agent.status));
-  const attemptsKey = expansionKey("attempts", task.id);
-  const attemptsShown = state.expanded.has(attemptsKey);
+  const agents = task.agents || [];
+  const runs = task.runs || [];
+  const key = expansionKey("task-details", task.id);
+  const shown = state.expanded.has(key);
   const label = node("div", "row-label task-label");
   const main = node("button", "task-main");
   main.type = "button";
@@ -648,26 +1003,27 @@ function renderTask(task) {
   title.append(node("span", "task-id", `#${task.id} `), document.createTextNode(task.subject || "Untitled task"));
   const meta = node("span", "task-meta", taskSubtitle(task));
   main.append(title, meta);
-  main.title = taskSubtitle(task);
-  main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskSubtitle(task)}. Show details.`);
+  main.title = taskDescription(task);
+  main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskDescription(task)}. Show details.`);
   attachDetails(main, task, "task", `task:${task.id}`);
   label.append(main);
-  if (finished.length) {
-    const count = finished.length;
-    const noun = count === 1 ? "attempt" : "attempts";
-    label.append(foldBadge(`${count} ${noun}`, `finished agent ${noun} on task ${task.id}`, attemptsKey, attemptsShown));
+  if (agents.length || runs.length) {
+    const counts = [agents.length ? plural(agents.length, "recorded agent") : "", runs.length ? plural(runs.length, "run") : ""].filter(Boolean).join(" and ");
+    const detailCount = agents.length + runs.length;
+    const noun = runs.length ? "detail" : "agent";
+    label.append(foldBadge(`${shown ? "Hide" : "Show"} ${plural(detailCount, noun)}`, `all ${counts} for task ${task.id}`, key, shown));
   }
   const track = makeTrack();
-  state.tracks.push({ track, item: task, kind: "task", main, meta, finished });
+  state.tracks.push({ track, item: task, kind: "task", main, meta });
   makeRow(label, track);
-  for (const agent of task.agents || []) {
-    if (LIVE_AGENT_STATUSES.has(agent.status) || attemptsShown) renderChild(agent, "agent", `task:${task.id}:agent:${agent.id}`);
+  if (shown) {
+    for (const agent of agents) renderChild(agent, "agent", `task:${task.id}:agent:${agent.id}`);
+    for (const [index, run] of runs.entries()) renderChild(run, "run", `task:${task.id}:run:${index}`);
   }
-  for (const [index, run] of (task.runs || []).entries()) renderChild(run, "run", `task:${task.id}:run:${index}`);
 }
 
 function foldBadge(text, folded, key, shown) {
-  const badge = node("button", "attempts-badge", text);
+  const badge = node("button", "detail-toggle", text);
   badge.type = "button";
   badge.setAttribute("aria-expanded", String(shown));
   badge.setAttribute("aria-label", `${shown ? "Hide" : "Show"} ${folded}`);
@@ -678,24 +1034,55 @@ function foldBadge(text, folded, key, shown) {
 
 function renderWorkflow(workflow) {
   const agents = workflow.agents || [];
-  const finished = agents.filter(agent => !LIVE_AGENT_STATUSES.has(agent.status));
-  const key = expansionKey("workflow", workflow.id);
+  const key = expansionKey("workflow-details", workflow.id);
   const shown = state.expanded.has(key);
   const label = node("div", "row-label task-label");
   const main = node("button", "task-main");
   main.type = "button";
   main.append(node("span", "task-title", workflow.name));
-  main.title = workflow.description || workflow.name;
-  main.setAttribute("aria-label", `Workflow ${workflow.name}: ${titleCase(workflow.status)}. Show details.`);
+  const summary = `${titleCase(workflow.status)} · ${recordedAgentCounts(agents)}`;
+  main.append(node("span", "task-meta", summary));
+  main.title = [workflow.description || workflow.name, summary].join("\n");
+  main.setAttribute("aria-label", `Workflow ${workflow.name}: ${summary}. Show details.`);
   attachDetails(main, workflow, "workflow", `workflow:${workflow.id}`);
   label.append(main);
-  if (finished.length) label.append(foldBadge(`${finished.length}/${agents.length} done`, `${plural(finished.length, "finished agent")} of workflow ${workflow.name}`, key, shown));
+  if (agents.length) label.append(foldBadge(`${shown ? "Hide" : "Show"} ${plural(agents.length, "agent")}`, `all ${plural(agents.length, "recorded agent")} for workflow ${workflow.name}`, key, shown));
   const track = makeTrack();
-  state.tracks.push({ track, item: workflow, kind: "workflow", finished });
-  makeRow(label, track);
+  state.tracks.push({ track, item: workflow, kind: "workflow" });
+  makeRow(label, track, "overview-row");
+  if (shown) for (const agent of agents) renderChild(agent, "agent", `workflow:${workflow.id}:agent:${agent.id}`);
+}
+
+function recordedAgentCounts(agents) {
+  const counts = new Map();
   for (const agent of agents) {
-    if (LIVE_AGENT_STATUSES.has(agent.status) || shown) renderChild(agent, "agent", `workflow:${workflow.id}:agent:${agent.id}`);
+    const status = agent.status || "unknown";
+    counts.set(status, (counts.get(status) || 0) + 1);
   }
+  const statuses = [...counts].sort(([left], [right]) => left.localeCompare(right))
+    .map(([status, count]) => `${count} ${status.replaceAll("_", " ")}`).join(", ");
+  return `${plural(agents.length, "recorded agent")}${statuses ? `: ${statuses}` : ""}`;
+}
+
+function activitySpan(agents, now) {
+  const starts = agents.map(agent => timestamp(agent.started)).filter(value => value !== null);
+  const ends = agents.map(agent => agentEnd(agent, now)).filter(value => value !== null);
+  return { start: starts.length ? Math.min(...starts) : null, end: ends.length ? Math.max(...ends) : null };
+}
+
+function renderOtherAgents(agents) {
+  const key = expansionKey("other-agents");
+  const shown = state.expanded.has(key);
+  const label = node("div", "row-label task-label");
+  const main = node("div", "activity-main");
+  const summary = recordedAgentCounts(agents);
+  main.append(node("span", "task-title", "Other agent activity"), node("span", "task-meta", summary));
+  main.title = summary;
+  label.append(main, foldBadge(`${shown ? "Hide" : "Show"} ${plural(agents.length, "agent")}`, `all ${plural(agents.length, "recorded agent")}`, key, shown));
+  const track = makeTrack();
+  state.tracks.push({ track, item: agents, kind: "activity" });
+  makeRow(label, track, "overview-row");
+  if (shown) for (const agent of agents) renderChild(agent, "agent", `agent:${agent.id}`);
 }
 
 function renderSummary(lane, milestone, tasks) {
@@ -719,16 +1106,16 @@ function renderSummary(lane, milestone, tasks) {
   if (shown) for (const task of tasks) renderTask(task);
 }
 
-function renderChild(item, kind, key) {
+function renderChild(item, kind, key, className = "child-row") {
   const label = node("button", "row-label");
   label.type = "button";
-  const title = kind === "run" ? item.label || "Run" : item.description || `Agent ${item.id}`;
+  const title = kind === "run" ? item.label || "Run" : item.description || (item.agentType === "session" ? "Session activity" : `Agent ${item.id}`);
   label.append(node("span", "task-title", `${titleCase(item.status)} \u00b7 ${title}`));
   label.title = title;
   attachDetails(label, item, kind, key);
   const track = makeTrack();
   state.tracks.push({ track, item, kind });
-  makeRow(label, track, "child-row");
+  makeRow(label, track, className);
 }
 
 function createBar(track, className, start, end, text, pulse = false) {
@@ -756,19 +1143,36 @@ function createBar(track, className, start, end, text, pulse = false) {
 function paintTask(track, task, now) {
   const started = timestamp(task.started);
   const ended = timestamp(task.ended);
-  const projectedStart = projectedTime(task.projectedStart, now);
-  const projectedEnd = projectedTime(task.projectedEnd, now);
+  const projectedEnd = projectedTime(task.projectedEnd, now, task.projectionAnchored === true);
+  const segments = taskSegments(task, now);
   if (task.status === "completed") {
     if (started !== null && ended !== null) createBar(track, "done", started, ended, "Done");
     else track.append(node("span", "row-marker", "No history"));
   } else if (task.status === "in_progress") {
-    if (started !== null) createBar(track, `${isOverrun(task, now) ? "overrun" : "running"}${projectedEnd !== null && projectedEnd > now ? " has-tail" : ""}`, started, now, percent(task.effectiveProgress ?? task.progress), true);
+    const hasTail = segments.some(segment => segment.start <= now && segment.end > now);
+    if (started !== null) createBar(track, `${isOverrun(task, now) ? "overrun" : "running"}${hasTail ? " has-tail" : ""}`, started, now, percent(task.effectiveProgress ?? task.progress), true);
     else track.append(node("span", "row-marker", "No history"));
-    if (projectedEnd !== null && projectedEnd > now) createBar(track, "projected projected-tail", now, projectedEnd, "Projected");
-  } else if (projectedStart !== null && projectedEnd !== null) {
-    createBar(track, task.queued ? "projected queued" : "projected", projectedStart, projectedEnd, task.queued ? waitingLabel(task) : "Projected");
   }
-  if (task.status !== "completed" && projectedEnd === null) {
+  if (task.status !== "completed") {
+    for (const segment of segments) {
+      const running = task.status === "in_progress";
+      const start = running ? Math.max(now, segment.start) : segment.start;
+      if (segment.end < start || (running && segment.end === start)) continue;
+      const tail = running && segment.start <= now ? " projected-tail" : "";
+      createBar(track, `projected${tail}${task.queued ? " queued" : ""}`, start, segment.end,
+        task.queued ? waitingLabel(task) : "Projected");
+    }
+    for (const delay of taskQuotaDelays(task)) {
+      const pause = createBar(track, `quota-pause${delay.end === null ? " open-end" : ""}`,
+        delay.start, delay.end ?? state.range.end);
+      if (pause) {
+        pause.textContent = "Quota pause";
+        pause.title = quotaDelayDescription(delay);
+        pause.setAttribute("aria-label", `Quota pause: ${pause.title}`);
+      }
+    }
+  }
+  if (task.status !== "completed" && projectedEnd === null && !currentQuotaDelay(task, now)) {
     const reason = (task.markers || []).join(" · ") || (task.blocked ? "unresolved prerequisite" : "Unestimated");
     const marker = node("span", `row-marker ${task.blocked ? "blocked-marker" : "warning"}`, `${task.blocked ? "Blocked · " : ""}${reason}`);
     if (started !== null) marker.style.left = `${Math.max(10, Math.min(state.plotWidth - 140, xPosition(now) + 10))}px`;
@@ -777,7 +1181,7 @@ function paintTask(track, task, now) {
 }
 
 function agentClass(item) {
-  return item.status === "running" ? "running" : item.status === "silent" ? "silent" : item.status === "completed" ? "done" : "blocked";
+  return item.status === "running" ? "running" : item.status === "silent" || item.status === "idle" ? "silent" : item.status === "completed" ? "done" : "blocked";
 }
 
 function agentEnd(item, now) {
@@ -793,26 +1197,20 @@ function paintChild(track, item, now) {
   createBar(track, agentClass(item), timestamp(item.started), agentEnd(item, now), childBarLabel(item), item.status === "running");
 }
 
-function paintAttempts(track, attempts, now) {
-  for (const attempt of attempts) {
-    const mark = createBar(track, `attempt-mark ${agentClass(attempt)}`, timestamp(attempt.started), agentEnd(attempt, now));
-    if (mark) mark.title = `${titleCase(attempt.status)} \u00b7 ${attempt.description || `Agent ${attempt.id}`}`;
-  }
-}
-
 function paintTimeline(now) {
   if (!state.range) return;
-  for (const { track, item, kind, main, meta, finished } of state.tracks) {
+  for (const { track, item, kind, main, meta } of state.tracks) {
     for (const old of track.querySelectorAll(".bar, .bar-label, .row-marker")) old.remove();
     if (kind === "task") {
       paintTask(track, item, now);
-      paintAttempts(track, finished, now);
-      main.title = taskSubtitle(item, now);
-      meta.textContent = main.title;
+      main.title = taskDescription(item, now);
+      meta.textContent = taskSubtitle(item, now);
     } else if (kind === "summary") createBar(track, "done summary-bar", timestamp(item.started), timestamp(item.ended));
-    else if (kind === "workflow") {
-      paintChild(track, item, now);
-      paintAttempts(track, finished, now);
+    else if (kind === "activity") {
+      const span = activitySpan(item, now);
+      const running = item.some(agent => agent.status === "running");
+      createBar(track, running ? "running" : "activity-span", span.start, span.end, "Activity span", running);
+      if (span.start === null || span.end === null) track.append(node("span", "row-marker", "No recorded timing"));
     } else paintChild(track, item, now);
   }
   for (const line of elements["timeline-content"].querySelectorAll(".now-line")) {
@@ -821,18 +1219,39 @@ function paintTimeline(now) {
   }
 }
 
-function renderForecastHealth(live) {
+function renderHarnessHealth(connected) {
+  const health = elements["harness-health"];
+  const checked = timestamp(state.liveness?.checkedAt);
+  const age = checked === null ? null : Date.now() - checked;
+  const fresh = age !== null && age >= 0 && age < CONNECTION_STALE_AFTER;
+  const reported = state.liveness?.status;
+  const status = connected && fresh && (reported === "alive" || reported === "exited") ? reported : "unknown";
+  health.textContent = `Harness: ${status}`;
+  health.dataset.status = status;
+  const reason = !connected ? "Connection disconnected; harness status is unknown."
+    : !fresh ? checked === null ? "No valid harness check received." : "Harness check expired or has an invalid time."
+    : state.liveness?.detail || "No verified harness state is available.";
+  health.title = `${reason}${checked === null ? "" : ` Checked: ${dateTime(checked, true)}.`}`;
+}
+
+function renderForecastHealth() {
   const stale = state.model?.freshness?.stale;
   const changed = state.model?.freshness?.sinceChangeSeconds;
-  const age = changed === null || changed === undefined ? null : changed * SECOND + modelAge(Date.now());
-  const message = !state.model ? "" : !live
-    ? "Connection lost. Estimates may be out of date."
-    : stale ? "Plan is stale. Estimates need attention."
-    : age === null ? "Times are shown in your local time"
-    : `Plan updated ${duration(age)} ago`;
+  const updated = (state.model?.tasks || []).reduce((latest, task) => {
+    const time = timestamp(task.updatedAt);
+    if (time === null) return latest;
+    return latest === null ? time : Math.max(latest, time);
+  }, null);
+  const age = Number.isFinite(changed) ? changed * SECOND + modelAge(Date.now())
+    : updated === null ? null : Math.max(0, Date.now() - updated);
+  const message = !state.model ? "" : stale ? "Plan: stale"
+    : age === null ? "Plan: no progress report"
+    : `Plan: updated ${duration(age)} ago`;
   const health = elements["forecast-health"];
   if (health.textContent !== message) health.textContent = message;
-  health.classList.toggle("is-warning", Boolean(state.model && (!live || stale)));
+  health.title = age === null ? "No recorded plan update is available."
+    : `Last recorded plan update was ${duration(age)} ago.${stale ? " Estimates need attention." : ""}`;
+  health.classList.toggle("is-warning", Boolean(state.model && stale));
 }
 
 function renderMilestones(now) {
@@ -885,7 +1304,9 @@ function renderMilestones(now) {
   if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.join(", ")}`));
   if (!milestones.length) {
     const hasAgents = (state.model.agents || []).length || (state.model.workflows || []).length;
-    elements.milestones.append(node("p", "overview-empty", hasAgents
+    elements.milestones.append(node("p", "overview-empty", state.model.provider === "codex"
+      ? "No supported task plan is recorded for this Codex session. Activity and usage are shown."
+      : hasAgents
       ? "Agent activity is shown below. Add planned tasks with estimates to get progress and finish forecasts."
       : "Add planned tasks with estimates to see progress and a finish forecast."));
   }
@@ -894,8 +1315,8 @@ function renderMilestones(now) {
 
 function paintMilestones(now) {
   for (const item of state.milestoneDates) {
-    const base = timestamp(item.milestone[item.key]);
-    const time = base === null ? null : base + (item.milestone.hasRemaining ? modelAge(now) : 0);
+    const anchored = !item.milestone.hasRemaining || item.milestone[`${item.key}Anchored`] === true;
+    const time = projectedTime(item.milestone[item.key], now, anchored);
     item.node.textContent = time === null ? (item.key === "p50" ? "Unknown" : "Unavailable") : forecastTime(time, now);
     if (time === null) item.node.removeAttribute("datetime");
     else item.node.dateTime = new Date(time).toISOString();
@@ -904,12 +1325,6 @@ function paintMilestones(now) {
         ? "Expected now" : `About ${duration(Math.ceil((time - now) / MINUTE) * MINUTE)} left`;
     }
   }
-}
-
-function activeInWindow(agent, now) {
-  const start = timestamp(agent.started);
-  const end = timestamp(agent.ended) ?? (agent.status === "running" || agent.status === "silent" ? now : timestamp(agent.lastActivityAt));
-  return start !== null && end !== null && start <= state.range.end && end >= state.range.start;
 }
 
 function isFinishedLongAgo(task, now) {
@@ -946,12 +1361,15 @@ function renderTimeline(now, resetRange = false) {
     for (const [milestone, finished] of folded) renderSummary(name, milestone, finished);
     for (const task of open) renderTask(task);
   }
-  const agents = (state.model.agents || []).filter(agent => activeInWindow(agent, now));
-  if (agents.length) {
-    renderLane("Agents", agents.length);
-    for (const agent of agents) renderChild(agent, "agent", `agent:${agent.id}`);
+  const agents = state.model.agents || [];
+  const sessions = agents.filter(agent => agent.agentType === "session");
+  const otherAgents = agents.filter(agent => agent.agentType !== "session");
+  if (sessions.length || otherAgents.length) {
+    renderLane("Session activity", sessions.length + (otherAgents.length ? 1 : 0));
+    for (const session of sessions) renderChild(session, "agent", `agent:${session.id}`, "session-row");
+    if (otherAgents.length) renderOtherAgents(otherAgents);
   }
-  const workflows = (state.model.workflows || []).filter(workflow => activeInWindow(workflow, now));
+  const workflows = state.model.workflows || [];
   if (workflows.length) {
     renderLane("Workflows", workflows.length);
     for (const workflow of workflows) renderWorkflow(workflow);
@@ -1015,6 +1433,8 @@ function renderModel() {
   elements.project.textContent = shortProject(model.project) || "Unknown project";
   elements.project.title = model.project || "";
   elements["session-heading"].hidden = false;
+  elements["session-provider"].textContent = providerName(model.provider);
+  renderTokens();
   elements["session-name"].textContent = shortProject(model.project) || model.title || "Session";
   elements["session-description"].textContent = model.title || "";
   elements["session-description"].hidden = !model.title || model.title === shortProject(model.project);
@@ -1036,13 +1456,35 @@ function renderModel() {
 
 function tick() {
   const now = Date.now();
+  const lastStreamActivity = state.lastReceived ?? state.streamStarted;
+  if (state.stream && lastStreamActivity !== null && now - lastStreamActivity >= CONNECTION_STALE_AFTER) recoverStream();
   renderConnection();
   renderPicker();
+  for (const { field, label, value } of state.usageAges) field.textContent = `${label}: ${elapsedLabel(value, now)}`;
+  paintUsageForecasts(now);
   if (!state.model) return;
   if (state.follow && now - state.lastRebase >= FOLLOW_REBASE_INTERVAL) renderTimeline(now, true);
   else paintTimeline(now);
   paintMilestones(now);
 }
+
+function setOverviewOpen(open) {
+  const panel = elements["overview-panel"];
+  const toggle = elements["overview-toggle"];
+  panel.classList.toggle("is-open", open);
+  toggle.setAttribute("aria-expanded", String(open));
+  if (open) panel.focus({ preventScroll: true });
+  else if (panel.contains(document.activeElement)) toggle.focus({ preventScroll: true });
+}
+
+elements["overview-toggle"].addEventListener("click", () => {
+  setOverviewOpen(elements["overview-toggle"].getAttribute("aria-expanded") !== "true");
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && elements["overview-toggle"].getAttribute("aria-expanded") === "true") {
+    setOverviewOpen(false);
+  }
+});
 
 elements.session.addEventListener("click", () => {
   if (pickerOpen()) closePicker(true);
@@ -1135,25 +1577,29 @@ document.addEventListener("keydown", event => {
 window.addEventListener("resize", () => {
   if (state.model) renderTimeline(Date.now(), state.follow);
 });
-window.addEventListener("pagehide", closeStream);
+window.addEventListener("pagehide", () => {
+  state.pageInactive = true;
+  closeStream();
+});
+window.addEventListener("pageshow", () => {
+  state.pageInactive = false;
+  if (!state.stream) connectStream();
+});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) closeStream();
-  else if (state.selected && !state.stream) selectSession(state.selected);
+  else if (!state.stream) connectStream();
 });
 
 async function start() {
   try {
-    const response = await fetch("/api/lists", { cache: "no-store" });
+    const response = await readLocal("/api/lists");
     if (!response.ok) throw new Error("Session discovery failed");
     const result = await response.json();
     renderLists(result.lists);
-    const linked = linkedSession();
-    const first = state.lists.find(list => list.id === linked) || state.lists.find(list => list.chartable);
-    if (first) selectSession(first.id);
-    else if (state.lists.length) setNotice("No session has tasks or agents yet. Choose All sessions in the session picker to open another.");
-    else setNotice("No sessions found. Start a Claude Code session with tasks, then refresh this page.");
+    selectSession(preferredSession());
   } catch {
     setNotice("Cannot reach the local server. Retrying…");
+    if (!state.stream) connectStream();
     window.setTimeout(start, DISCOVERY_RETRY_DELAY);
   }
 }
