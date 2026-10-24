@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import math
+from copy import deepcopy
 import unittest
 
 from live_gantt.schedule import project
@@ -32,7 +33,148 @@ def projected_tasks(items):
     return {item["id"]: item for item in project(items, NOW)["tasks"]}
 
 
+def quota_window(*, used=100, reset=2, exhaust=None, observed=0, stale=False, bucket="codex"):
+    return {"bucketId": bucket, "usedPercent": used, "resetsAt": timestamp(reset) if reset is not None else None,
+            "observedAt": timestamp(observed), "measuredAt": None, "stale": stale,
+            "forecast": {"status": "predicted" if exhaust is not None else "reached",
+                         "exhaustsAt": timestamp(exhaust) if exhaust is not None else None}}
+
+
+def quota(*windows, provider="codex"):
+    return {"providers": [{"provider": provider, "windows": list(windows)}]}
+
+
 class ProjectionTests(unittest.TestCase):
+    def test_current_quota_limit_shifts_work_and_dependencies_without_mutating_input(self):
+        items = [task(1, status="in_progress", started=timestamp(-1)),
+                 task(2, lane="Other", blockedBy=["1"], metadata={"provider": "external"})]
+        original = deepcopy(items)
+        model = project(items, NOW, provider="codex", usage=quota(quota_window()))
+        first, second = model["tasks"]
+        self.assertEqual(items, original)
+        self.assertEqual((first["projectedStart"], first["projectedEnd"]), (timestamp(2), timestamp(3)))
+        self.assertEqual(first["projectedSegments"], [{"start": timestamp(2), "end": timestamp(3)}])
+        self.assertEqual(first["quotaDelays"], [{"start": timestamp(), "end": timestamp(2),
+                                               "provider": "codex", "reason": "reached"}])
+        self.assertTrue(first["projectionAnchored"])
+        self.assertEqual(second["projectedStart"], timestamp(3))
+        self.assertEqual(second["quotaDelays"], [])
+        self.assertTrue(second["projectionAnchored"])
+        self.assertTrue(model["quotaConstrained"])
+        self.assertTrue(model["milestones"][0]["p50Anchored"])
+
+    def test_future_outage_splits_work_but_exact_boundary_and_zero_work_do_not_pause(self):
+        model = project([task(1, 2), task(2, 1, lane="Exact"), task(3, 0, lane="Zero")], NOW,
+                        provider="codex", usage=quota(quota_window(used=40, exhaust=1, reset=3)))
+        by_id = {item["id"]: item for item in model["tasks"]}
+        self.assertEqual(by_id["1"]["projectedSegments"], [
+            {"start": timestamp(), "end": timestamp(1)},
+            {"start": timestamp(3), "end": timestamp(4)}])
+        self.assertEqual(by_id["1"]["projectedEnd"], timestamp(4))
+        for identifier, hours in (("2", 1), ("3", 0)):
+            self.assertEqual(by_id[identifier]["projectedEnd"], timestamp(hours))
+            self.assertFalse(by_id[identifier]["projectionAnchored"])
+            self.assertEqual(by_id[identifier]["quotaDelays"], [])
+
+    def test_overlapping_windows_merge_and_lane_followers_do_not_repeat_pause(self):
+        model = project([task(1), task(2)], NOW, provider="codex",
+                        usage=quota(quota_window(reset=2), quota_window(reset=4)))
+        first, second = model["tasks"]
+        self.assertEqual(first["projectedStart"], timestamp(4))
+        self.assertEqual(len(first["quotaDelays"]), 1)
+        self.assertEqual(second["projectedStart"], timestamp(5))
+        self.assertEqual(second["quotaDelays"], [])
+        self.assertTrue(second["projectionAnchored"])
+
+    def test_provider_overrides_and_unassigned_external_runs_do_not_take_session_quota(self):
+        model = project([task(1, lane="Other", metadata={"provider": "claude"}),
+                         task(2, lane="External", metadata={"provider": "external"}),
+                         task(3, lane="Run", runs=[{"label": "training"}]),
+                         task(4, lane="Fallback", metadata={"provider": "typo"})], NOW,
+                        provider="codex", usage=quota(quota_window()))
+        by_id = {item["id"]: item for item in model["tasks"]}
+        for identifier in ("1", "2", "3"):
+            self.assertEqual(by_id[identifier]["projectedEnd"], timestamp(1))
+            self.assertFalse(by_id[identifier]["projectionAnchored"])
+        self.assertEqual(by_id["4"]["projectedStart"], timestamp(2))
+        self.assertTrue(by_id["4"]["warnings"])
+
+    def test_unusable_and_scoped_quota_do_not_change_schedule(self):
+        for window in (quota_window(stale=True), quota_window(observed=-1),
+                       quota_window(bucket="review"), quota_window(reset=-1)):
+            with self.subTest(window=window):
+                model = project([task(1)], NOW, provider="codex", usage=quota(window))
+                self.assertEqual(model["tasks"][0]["projectedEnd"], timestamp(1))
+                self.assertFalse(model["quotaConstrained"])
+        model = project([task(1)], NOW, provider="codex", usage=None)
+        self.assertEqual(model["tasks"][0]["projectedEnd"], timestamp(1))
+
+    def test_reached_limit_without_reset_keeps_affected_and_dependent_dates_unknown(self):
+        model = project([task(1), task(2)], NOW, provider="codex",
+                        usage=quota(quota_window(reset=None)))
+        self.assertTrue(model["quotaConstrained"])
+        for item in model["tasks"]:
+            self.assertIsNone(item["projectedEnd"])
+            self.assertTrue(item["projectionAnchored"])
+        self.assertTrue(model["warnings"])
+        self.assertIsNone(model["milestones"][0]["p50"])
+
+    def test_uncertain_completion_uses_provider_calendar_and_keeps_independent_variance(self):
+        model = project([task(1, estimate={"low": 0, "likely": 1, "high": 2}),
+                         task(2, estimate={"low": 0, "likely": 1, "high": 2})], NOW,
+                        provider="codex", usage=quota(quota_window(used=40, exhaust=2.1, reset=4)))
+        milestone = model["milestones"][0]
+        self.assertEqual(milestone["p50"], timestamp(2))
+        expected_hours = 2 + 1.2816 * math.sqrt(2 * (1 / 3) ** 2) + 1.9
+        self.assertEqual(milestone["p90"], timestamp(expected_hours))
+        self.assertFalse(milestone["p50Anchored"])
+        self.assertTrue(milestone["p90Anchored"])
+
+    def test_uncertainty_pause_propagates_into_an_external_dependency(self):
+        estimate = {"low": 0, "likely": 1, "high": 2}
+        model = project([task(1, estimate=estimate, lane="Model"),
+                         task(2, estimate=estimate, lane="External", blockedBy=["1"],
+                              metadata={"provider": "external"})], NOW,
+                        provider="codex", usage=quota(quota_window(used=40, exhaust=1.2, reset=3)))
+        milestone = model["milestones"][0]
+        self.assertEqual(milestone["p50"], timestamp(2))
+        self.assertEqual(milestone["p90"], timestamp(2 + 1.2816 * math.sqrt(2 / 9) + 1.8))
+        self.assertTrue(milestone["p90Anchored"])
+
+    def test_upper_path_that_outlasts_quota_pause_does_not_repeat_mean_delay(self):
+        model = project([task(1, estimate={"low": 0, "likely": 0, "high": 6},
+                              lane="A", metadata={"provider": "external"}),
+                         task(2, lane="B", blockedBy=["1"])], NOW,
+                        provider="codex", usage=quota(quota_window(used=40, exhaust=1.2, reset=2)))
+        milestone = model["milestones"][0]
+        self.assertEqual(milestone["p50"], timestamp(2.8))
+        self.assertTrue(milestone["p50Anchored"])
+        self.assertEqual(milestone["p90"], timestamp(3.2816))
+        self.assertFalse(milestone["p90Anchored"])
+
+    def test_missing_percentage_cannot_turn_a_forecast_into_a_quota_outage(self):
+        window = quota_window(used=None, exhaust=0.5)
+        model = project([task(1)], NOW, provider="codex", usage=quota(window))
+        self.assertEqual(model["tasks"][0]["projectedEnd"], timestamp(1))
+        self.assertFalse(model["quotaConstrained"])
+
+    def test_calendar_overflow_with_large_uncertainty_remains_unknown(self):
+        model = project([task(1, estimate={"low": 0, "likely": 0, "high": 1e308})], NOW)
+        self.assertIsNone(model["tasks"][0]["projectedEnd"])
+        self.assertTrue(model["warnings"])
+
+    def test_completed_work_and_freshness_boundary_preserve_original_meaning(self):
+        completed = task(1, status="completed", started=timestamp(-2), ended=timestamp(-1))
+        window = quota_window(observed=-5 / 60)
+        model = project([completed, task(2)], NOW, provider="codex", usage=quota(window))
+        done, pending = model["tasks"]
+        self.assertEqual(done["projectedSegments"], [])
+        self.assertEqual(done["quotaDelays"], [])
+        self.assertEqual(done["ended"], timestamp(-1))
+        self.assertEqual(pending["projectedStart"], timestamp(2))
+        later = project([task(2)], NOW + timedelta(microseconds=1), provider="codex", usage=quota(window))
+        self.assertFalse(later["quotaConstrained"])
+
     def test_lane_chain_uses_natural_id_order(self):
         items = [task(10), task(2, 2), task(1)]
         actual = projected_tasks(items)

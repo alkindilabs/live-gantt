@@ -65,6 +65,172 @@ class SourceStoreTests(unittest.TestCase):
     def state(self):
         return self.store.state(self.list_id, self.now)
 
+    def test_runtime_activity_ignores_metadata_accounting_and_malformed_records(self):
+        self.append({"type": "user", "timestamp": "2026-10-15T09:00:00Z", "message": {"content": "Please build it"}})
+        first = self.state()["_runtime"]
+        self.assertEqual(first, {"phase": "working", "lastActivityAt": "2026-10-15T09:00:00Z", "detail": None})
+        self.append({"type": "assistant", "timestamp": "2026-10-15T10:00:00Z",
+                     "message": {"id": "usage-only", "content": [], "usage": {"output_tokens": 7}}},
+                    {"type": "custom-title", "timestamp": "2026-10-15T10:01:00Z", "customTitle": "Updated title"},
+                    {"type": "user", "isMeta": True, "timestamp": "2026-10-15T10:02:00Z", "message": {"content": "Metadata"}})
+        with self.transcript.open("a") as stream:
+            stream.write('{"timestamp":"2026-10-15T10:03:00Z","type":"user",bad}\n')
+        self.assertEqual(self.state()["_runtime"], first)
+        self.append(self.tool("2026-10-15T10:04:00Z", "Bash", {"command": "build"}))
+        self.assertEqual(self.state()["_runtime"]["lastActivityAt"], "2026-10-15T10:04:00Z")
+        self.append(self.result("2026-10-15T10:05:00Z", "Build result"),
+                    {"type": "system", "subtype": "turn_duration", "timestamp": "2026-10-15T10:06:00Z"})
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "idle", "lastActivityAt": "2026-10-15T10:06:00Z", "detail": None})
+
+    def test_runtime_terminal_failure_is_sanitized_and_next_request_recovers(self):
+        self.append({"type": "result", "subtype": "error_during_execution", "timestamp": "2026-10-15T09:00:00Z",
+                     "errors": ["private path and credentials"]})
+        failure = self.state()["_runtime"]
+        self.assertEqual(failure["phase"], "failed")
+        self.assertEqual(failure["lastActivityAt"], "2026-10-15T09:00:00Z")
+        self.assertNotIn("private", str(failure))
+        self.append({"type": "user", "timestamp": "2026-10-15T09:01:00Z", "message": {"content": "Try again"}})
+        self.assertEqual(self.state()["_runtime"]["phase"], "working")
+        error = self.result("2026-10-15T09:02:00Z", "recoverable tool failure")
+        error["message"]["content"][0]["is_error"] = True
+        self.append(error)
+        self.assertEqual(self.state()["_runtime"]["phase"], "working")
+        self.append({"type": "user", "timestamp": "2026-10-15T09:03:00Z", "message": {"content": "[Request interrupted by user]"}})
+        self.assertEqual(self.state()["_runtime"]["phase"], "interrupted")
+
+    def test_assistant_response_end_does_not_confirm_harness_completion(self):
+        self.append({"type": "assistant", "timestamp": "2026-10-15T10:00:00Z",
+                     "message": {"content": [{"type": "text", "text": "The command finished."}],
+                                 "stop_reason": "end_turn"}})
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "unknown", "lastActivityAt": "2026-10-15T10:00:00Z", "detail": None})
+        self.append({"type": "system", "subtype": "turn_duration", "timestamp": "2026-10-15T10:00:02Z"})
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "idle", "lastActivityAt": "2026-10-15T10:00:02Z", "detail": None})
+
+    def test_runtime_ignores_repeated_message_with_only_changed_accounting(self):
+        message = {"id": "response", "content": [{"type": "text", "text": "Working on it"}], "stop_reason": None}
+        self.append({"type": "assistant", "timestamp": "2026-10-15T09:00:00Z", "message": message})
+        self.assertEqual(self.state()["_runtime"]["lastActivityAt"], "2026-10-15T09:00:00Z")
+        self.append({"type": "assistant", "timestamp": "2026-10-15T10:00:00Z",
+                     "message": {**message, "usage": {"output_tokens": 70}}})
+        self.assertEqual(self.state()["_runtime"]["lastActivityAt"], "2026-10-15T09:00:00Z")
+        self.append({"type": "assistant", "timestamp": "2026-10-15T10:01:00Z",
+                     "message": {**message, "stop_reason": "end_turn"}})
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "unknown", "lastActivityAt": "2026-10-15T10:01:00Z", "detail": None})
+
+    def test_runtime_turn_end_with_background_work_does_not_claim_completion(self):
+        self.append({"type": "system", "subtype": "turn_duration", "timestamp": "2026-10-15T09:00:00Z",
+                     "pendingBackgroundAgentCount": 1})
+        self.assertEqual(self.state()["_runtime"]["phase"], "working")
+        self.append({"type": "assistant", "timestamp": "2026-10-15T09:01:00Z",
+                     "message": {"content": [{"type": "text", "text": "Turn response"}], "stop_reason": "end_turn"}})
+        self.assertEqual(self.state()["_runtime"]["phase"], "unknown")
+        self.transcript.write_text("")
+        self.assertEqual(self.state()["_runtime"], {"phase": "unknown", "lastActivityAt": None, "detail": None})
+
+    def test_runtime_unanswered_question_stays_unverified_until_matching_result(self):
+        question = {"questions": [{"question": "Private question", "header": "Choice",
+                     "options": [{"label": "First", "description": "One"},
+                                 {"label": "Second", "description": "Two"}], "multiSelect": False}]}
+        self.append(self.tool("2026-10-15T09:00:00Z", "AskUserQuestion", question, "question-1"))
+        runtime = self.state()["_runtime"]
+        self.assertEqual(runtime["phase"], "unknown")
+        self.assertEqual(runtime["detail"], "Recorded input request has no recorded response.")
+        self.assertNotIn("Private", json.dumps(runtime))
+        self.append(self.result("2026-10-15T09:01:00Z", "unrelated", "other-tool"),
+                    {"type": "user", "isMeta": True, "timestamp": "2026-10-15T09:02:00Z",
+                     "message": {"content": "Metadata is not a response"}})
+        self.assertEqual(self.state()["_runtime"]["phase"], "unknown")
+        self.append({"type": "user", "timestamp": "2026-10-15T09:02:30Z",
+                     "message": {"content": "<task-notification><status>completed</status></task-notification>"}})
+        self.assertEqual(self.state()["_runtime"]["phase"], "unknown")
+        self.append(self.result("2026-10-15T09:03:00Z", "answered", "question-1"))
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "working", "lastActivityAt": "2026-10-15T09:03:00Z", "detail": None})
+
+    def test_runtime_question_clears_on_user_turn_response_end_or_turn_end(self):
+        question = {"questions": [{"question": "Choose"}]}
+        endings = [
+            ({"type": "user", "message": {"content": "New request"}}, "working"),
+            ({"type": "assistant", "message": {"content": "Response finished", "stop_reason": "end_turn"}}, "unknown"),
+            ({"type": "system", "subtype": "turn_duration"}, "idle"),
+            ({"type": "result", "subtype": "error_during_execution"}, "failed"),
+        ]
+        for record, expected in endings:
+            with self.subTest(kind=record["type"]):
+                self.append(self.tool("2026-10-15T10:00:00Z", "AskUserQuestion", question, "question-2"))
+                self.assertEqual(self.state()["_runtime"]["phase"], "unknown")
+                self.append({**record, "timestamp": "2026-10-15T10:01:00Z"})
+                self.assertEqual(self.state()["_runtime"]["phase"], expected)
+                if expected == "unknown":
+                    self.assertIsNone(self.state()["_runtime"]["detail"])
+                self.transcript.write_text("")
+                self.state()
+
+    def test_runtime_malformed_question_does_not_create_pending_input(self):
+        for questions in (None, [], [{}], [{"question": ""}], [{"question": 4}]):
+            self.append(self.tool("2026-10-15T09:00:00Z", "AskUserQuestion", {"questions": questions}, "invalid"))
+            self.assertEqual(self.state()["_runtime"]["phase"], "working")
+
+    def test_runtime_malformed_tool_blocks_do_not_restart_idle_work(self):
+        self.append({"type": "system", "subtype": "turn_duration", "timestamp": "2026-10-15T09:00:00Z"})
+        idle = self.state()["_runtime"]
+        malformed = [
+            {"type": "tool_use"},
+            {"type": "tool_use", "id": "call", "name": "Bash", "input": None},
+            {"type": "tool_use", "id": "", "name": "Bash", "input": {}},
+            {"type": "tool_result"},
+            {"type": "tool_result", "tool_use_id": " "},
+        ]
+        for block in malformed:
+            with self.subTest(block=block):
+                self.append({"type": "user" if block["type"] == "tool_result" else "assistant",
+                             "timestamp": "2026-10-15T10:00:00Z", "message": {"content": [block]}})
+                self.assertEqual(self.state()["_runtime"], idle)
+        for role, block in (("user", {"type": "tool_use", "id": "call", "name": "Bash", "input": {}}),
+                            ("assistant", {"type": "tool_result", "tool_use_id": "call", "content": ""})):
+            self.append({"type": role, "timestamp": "2026-10-15T10:00:00Z", "message": {"content": [block]}})
+            self.assertEqual(self.state()["_runtime"], idle)
+        self.append(self.tool("2026-10-15T10:01:00Z", "Bash", {}))
+        self.assertEqual(self.state()["_runtime"]["phase"], "working")
+        self.assertEqual(self.state()["_runtime"]["lastActivityAt"], "2026-10-15T10:01:00Z")
+
+    def test_runtime_empty_tool_result_requires_identifier_to_resolve_input(self):
+        self.append(self.tool("2026-10-15T09:00:00Z", "AskUserQuestion",
+                              {"questions": [{"question": "Choose"}]}, "question"))
+        pending = self.state()["_runtime"]
+        self.append(self.result("2026-10-15T10:00:00Z", "", ""))
+        self.assertEqual(self.state()["_runtime"], pending)
+        self.append(self.result("2026-10-15T10:01:00Z", "", "question"))
+        self.assertEqual(self.state()["_runtime"],
+                         {"phase": "working", "lastActivityAt": "2026-10-15T10:01:00Z", "detail": None})
+
+    def test_session_usage_counts_each_response_once_and_excludes_child_usage(self):
+        def response(identifier, output):
+            return {"type": "assistant", "timestamp": "2026-10-15T09:00:00Z",
+                    "message": {"id": identifier, "content": [], "usage": {
+                        "input_tokens": 10, "cache_read_input_tokens": 20,
+                        "cache_creation_input_tokens": 5, "output_tokens": output}}}
+
+        self.append(response("message-one", 1), response("message-one", 7),
+                    response("message-two", 3))
+        child = self.project_dir / self.list_id / "subagents" / "agent-child.jsonl"
+        child.parent.mkdir(parents=True)
+        self.append(response("child-message", 999), path=child)
+        usage = self.state()["tokenUsage"]
+        self.assertEqual(usage, {"inputTokens": 70, "cachedInputTokens": 40,
+                                 "cacheWriteTokens": 10, "outputTokens": 10,
+                                 "reasoningOutputTokens": None, "totalTokens": 80})
+        self.assertEqual(self.state()["tokenUsage"], usage)
+
+    def test_missing_and_invalid_usage_stays_unknown(self):
+        self.append({"type": "assistant", "message": {"id": "invalid", "usage": {
+            "input_tokens": True, "output_tokens": -1}}})
+        self.assertTrue(all(value is None for value in self.state()["tokenUsage"].values()))
+
     def test_task_lifecycle_skips_malformed_lines_and_uses_first_start_last_end(self):
         self.task(status="completed")
         self.append(
@@ -115,6 +281,109 @@ class SourceStoreTests(unittest.TestCase):
         task = self.state()["tasks"][0]
         self.assertEqual(task["started"], "2026-10-15T11:00:00Z")
         self.assertEqual(len(task["history"]), 1)
+
+    def test_incomplete_task_write_retains_last_valid_state_until_recovery_or_removal(self):
+        self.task(metadata={"progress": 70, "lane": "Build", "estimate": {"low": 1, "likely": 2, "high": 3}})
+        original = self.state()["tasks"][0]
+        path = self.task_dir / "1.json"
+        path.write_text('{"id":"1","status":')
+        retained = self.state()["tasks"][0]
+        self.assertEqual((retained["status"], retained["progress"], retained["lane"], retained["estimate"]),
+                         (original["status"], original["progress"], original["lane"], original["estimate"]))
+        self.assertFalse(retained["readable"])
+        self.assertTrue(retained["warnings"])
+        self.task(status="completed", metadata={"progress": 100})
+        recovered = self.state()["tasks"][0]
+        self.assertEqual((recovered["status"], recovered["progress"], recovered["readable"]),
+                         ("completed", 100, True))
+        path.unlink()
+        self.assertEqual(self.state()["tasks"], [])
+        path.write_text("broken")
+        self.assertEqual(self.state()["tasks"][0]["progress"], 0)
+        self.assertFalse(self.state()["tasks"][0]["readable"])
+
+    def test_failed_task_update_cannot_create_lifecycle_or_progress_history(self):
+        self.task(status="pending", metadata={"progress": 5})
+        self.append(self.tool("2026-10-15T09:00:00Z", "TaskUpdate",
+                              {"taskId": "1", "status": "in_progress", "metadata": {"progress": 20}}, "success"),
+                    self.result("2026-10-15T09:00:01Z", "Updated task #1", "success"))
+        self.assertEqual(len(self.state()["tasks"][0]["history"]), 2)
+        self.append(self.tool("2026-10-15T10:00:00Z", "TaskUpdate",
+                              {"taskId": "1", "status": "completed", "metadata": {"progress": 90}}, "denied"))
+        failed = self.result("2026-10-15T10:00:01Z", "Permission denied", "denied")
+        failed["message"]["content"][0]["is_error"] = True
+        self.append(failed)
+        task = self.state()["tasks"][0]
+        self.assertIsNone(task["ended"])
+        self.assertEqual([entry["event"] for entry in task["history"]], ["started", "progress"])
+        self.assertEqual([entry["value"] for entry in task["history"] if entry["event"] == "progress"], [20])
+
+    def test_discovery_io_failure_is_distinct_from_removed_sources(self):
+        self.task(metadata={"progress": 70})
+        self.assertEqual(self.store.lists()[0]["taskCount"], 1)
+
+        original_iterdir = Path.iterdir
+
+        def unavailable_directory(path):
+            if path == self.root / "tasks":
+                raise PermissionError("source temporarily unavailable")
+            return original_iterdir(path)
+
+        with patch.object(Path, "iterdir", unavailable_directory):
+            with self.assertRaises(PermissionError):
+                self.store.lists()
+        original_stat = Path.stat
+
+        def unavailable_task(path, *args, **kwargs):
+            if path == self.task_dir / "1.json":
+                raise PermissionError("task temporarily unavailable")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", unavailable_task):
+            with self.assertRaises(PermissionError):
+                self.store.lists()
+        self.assertEqual(self.store.lists()[0]["taskCount"], 1)
+
+    def test_larger_in_place_transcript_rewrite_discards_prior_history(self):
+        self.task()
+        self.append(self.tool("2026-10-15T09:00:00Z", "TaskUpdate", {"taskId": "1", "status": "in_progress"}),
+                    self.tool("2026-10-15T10:00:00Z", "TaskUpdate", {"taskId": "1", "metadata": {"progress": 70}}))
+        self.assertEqual(len(self.state()["tasks"][0]["history"]), 2)
+        previous_size = self.transcript.stat().st_size
+        replacement = self.tool("2026-10-15T11:00:00Z", "TaskUpdate", {
+            "taskId": "1", "status": "in_progress", "description": "replacement" * previous_size})
+        self.transcript.write_text(json.dumps(replacement) + "\n")
+        current = self.state()["tasks"][0]
+        self.assertEqual(current["started"], "2026-10-15T11:00:00Z")
+        self.assertEqual([event["event"] for event in current["history"]], ["started"])
+
+    def test_journal_counts_only_valid_top_level_results_and_detects_larger_rewrite(self):
+        journal = self.task_dir / "work.jsonl"
+        self.task(metadata={"live": {"journal": "work.jsonl", "planned": 4, "from": 0, "to": 100}})
+        journal.write_text('{"type":"result", BROKEN}\n{"type":"note","payload":{"type":"result"}}\n')
+        self.assertEqual(self.state()["tasks"][0]["liveProgress"], 0)
+        journal.write_text('{"type":"result"}\n{"type":"result"}\n')
+        self.assertEqual(self.state()["tasks"][0]["liveProgress"], 50)
+        journal.write_text(json.dumps({"type": "result", "payload": "replacement" * 100}) + "\n")
+        self.assertEqual(self.state()["tasks"][0]["liveProgress"], 25)
+
+    def test_required_transcript_and_journal_read_failures_propagate(self):
+        journal = self.task_dir / "work.jsonl"
+        journal.write_text('{"type":"result"}\n')
+        self.task(metadata={"live": {"journal": "work.jsonl", "planned": 4, "from": 0, "to": 100}})
+        self.append(self.tool("2026-10-15T09:00:00Z", "TaskUpdate", {"taskId": "1", "status": "in_progress"}))
+        self.assertEqual(self.state()["tasks"][0]["liveProgress"], 25)
+        original_open = Path.open
+        for failed_path in (self.transcript, journal):
+            with self.subTest(path=failed_path.name):
+                def denied(path, *args, **kwargs):
+                    if path == failed_path:
+                        raise PermissionError("source temporarily unavailable")
+                    return original_open(path, *args, **kwargs)
+                with patch.object(Path, "open", denied):
+                    with self.assertRaises(PermissionError):
+                        self.state()
+        self.assertEqual(self.state()["tasks"][0]["liveProgress"], 25)
 
     def test_complete_final_line_without_newline_is_read_once(self):
         self.task()
@@ -209,6 +478,47 @@ class SourceStoreTests(unittest.TestCase):
         self.assertIsNone(agent["ended"])
         self.append(self.hand_back("2026-10-15T11:50:00Z"), path=self.project_dir / self.list_id / "subagents" / "agent-resumed.jsonl")
         self.assertEqual(self.agents_by_id()["resumed"]["status"], "completed")
+
+    def test_nonexecution_records_do_not_revive_terminal_agents(self):
+        for status in ("completed", "failed"):
+            with self.subTest(status=status):
+                agent_id = f"terminal-{status}"
+                self.agent(agent_id, self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}))
+                self.append({"type": "user", "timestamp": "2026-10-15T11:10:00Z",
+                             "message": {"content": self.notification(agent_id, status)}})
+                before = self.agents_by_id()[agent_id]
+                path = self.project_dir / self.list_id / "subagents" / f"agent-{agent_id}.jsonl"
+                self.append(
+                    {"type": "assistant", "timestamp": "2026-10-15T11:20:00Z", "message": {
+                        "id": "accounting", "content": [], "usage": {"output_tokens": 10}}},
+                    {"type": "custom-title", "timestamp": "2026-10-15T11:21:00Z", "customTitle": "Metadata"},
+                    {"type": "user", "isMeta": True, "timestamp": "2026-10-15T11:22:00Z",
+                     "message": {"content": "Harness metadata"}}, path=path)
+                with path.open("a") as stream:
+                    stream.write('{"type":"assistant","timestamp":"2026-10-15T11:23:00Z",bad}\n')
+                after = self.agents_by_id()[agent_id]
+                self.assertEqual(after["status"], status)
+                self.assertEqual(after["ended"], before["ended"])
+                self.assertEqual(after["lastActivityAt"], before["lastActivityAt"])
+
+    def test_nonexecution_records_do_not_clear_agent_handback_or_extend_activity(self):
+        self.agent("handed-back", self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}),
+                   self.hand_back("2026-10-15T11:10:00Z"))
+        before = self.agents_by_id()["handed-back"]
+        path = self.project_dir / self.list_id / "subagents" / "agent-handed-back.jsonl"
+        self.append({"type": "assistant", "timestamp": "2026-10-15T11:20:00Z", "message": {
+            "id": "accounting", "content": [], "usage": {"output_tokens": 10}}}, path=path)
+        self.assertEqual(self.agents_by_id()["handed-back"], before)
+
+    def test_native_idle_observation_does_not_revive_terminal_agent(self):
+        self.agent("idle-child", self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}))
+        self.append({"type": "user", "timestamp": "2026-10-15T11:10:00Z",
+                     "message": {"content": self.notification("idle-child")}})
+        before = self.agents_by_id()["idle-child"]
+        self.append({"type": "system", "subtype": "session_state_changed", "state": "idle",
+                     "timestamp": "2026-10-15T11:59:00Z"},
+                    path=self.project_dir / self.list_id / "subagents" / "agent-idle-child.jsonl")
+        self.assertEqual(self.agents_by_id()["idle-child"], before)
 
     def test_agent_activity_is_the_latest_step_description_never_a_tool_name(self):
         self.agent("worker",
@@ -400,7 +710,8 @@ class SourceStoreTests(unittest.TestCase):
             listing = self.store.lists()[0]
         self.assertNotIn(self.transcript, opened)
         self.assertNotIn(custom_title, opened)
-        self.assertEqual(listing, {"id": self.list_id, "title": self.list_id, "prompt": "", "project": "",
+        self.assertEqual(listing, {"id": self.list_id, "provider": "claude", "sourceId": self.list_id,
+                                  "title": self.list_id, "prompt": "", "project": "",
                                    "updatedAt": "2026-09-30T12:00:00Z", "recent": False, "active": False,
                                    "chartable": False, "taskCount": 0, "agentCount": 0, "headless": False})
 

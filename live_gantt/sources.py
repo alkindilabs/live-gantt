@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import stat
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .freshness import session_active
+from .usage import empty_token_usage
 
 
 UTC = timezone.utc
@@ -22,6 +25,7 @@ RECENT_SESSION_WINDOW = timedelta(days=14)
 IDENTITY_SCAN_BYTES = 1024 * 1024
 IDENTITY_SCAN_LINES = 128
 IDENTITY_TAIL_BYTES = 256 * 1024
+APPEND_CHECK_BYTES = 256
 PROMPT_TITLE_CHARACTERS = 120
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
 LIVE_AGENT_STATUSES = frozenset({"running", "in_progress", "pending"})
@@ -29,12 +33,11 @@ TIMESTAMP_PATTERN = re.compile(rb'"timestamp"\s*:\s*"([^"\\]+)"')
 CREATION_PATTERN = re.compile(r"^Task #(\S+) created successfully(?:\b|:)")
 NOTIFICATION_PATTERN = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 RESULT_LINE_PATTERN = re.compile(rb'"type"\s*:\s*"result"')
-TURN_RECORD_PATTERN = re.compile(rb'"type"\s*:\s*"(?:user|assistant)"')
 AGENT_ID_PATTERN = re.compile(r'(?:agentId|agent_id)\s*[":=]+\s*["\s]*([\w-]+)')
 TASK_ID_PATTERN = re.compile(r'(?:task_id|taskId)\s*[":=]+\s*["\s]*([\w-]+)')
 RELEVANT_TOKENS = (b'"tool_use"', b'"tool_result"', b"<task-notification>")
 TITLE_RECORD_TOKEN = b'"custom-title"'
-TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"', TITLE_RECORD_TOKEN)
+TRANSCRIPT_TOKENS = RELEVANT_TOKENS + (b'"timestamp"', b'"cwd"', b'"user"', b'"usage"', TITLE_RECORD_TOKEN)
 CWD_PATTERN = re.compile(rb'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")')
 ENTRYPOINT_PATTERN = re.compile(rb'"entrypoint"\s*:\s*("(?:[^"\\]|\\.)*")')
 HEADLESS_ENTRYPOINT = "sdk-cli"
@@ -42,6 +45,14 @@ LIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 LEADING_WRAPPER = re.compile(r"\s*<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1\s*>", re.DOTALL)
 LONE_TAG_LINE = re.compile(r"\s*</?[A-Za-z][\w-]*(?:\s[^>]*)?/?>\s*\Z")
 ELLIPSIS = "\u2026"
+RUNTIME_FAILURE_DETAILS = {
+    "error_during_execution": "The turn failed during execution.",
+    "error_max_turns": "The turn reached its turn limit.",
+    "error_max_budget_usd": "The turn reached its spending limit.",
+    "error_max_structured_output_retries": "The turn could not produce the required output format.",
+}
+RUNTIME_SESSION_PHASES = {"running": "working", "requires_action": "waiting", "idle": "idle"}
+INTERRUPTION_TEXTS = frozenset({"[Request interrupted by user]", "[Request interrupted by user for tool use]"})
 
 
 def default_root() -> Path:
@@ -64,15 +75,19 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z") if value else None
 
 
-def _stat(path: Path) -> os.stat_result | None:
+def _stat(path: Path, *, strict: bool = False) -> os.stat_result | None:
     try:
         return path.stat()
-    except (OSError, ValueError):
+    except OSError as error:
+        if strict and not isinstance(error, FileNotFoundError):
+            raise
+        return None
+    except ValueError:
         return None
 
 
-def _regular_stat(path: Path) -> os.stat_result | None:
-    file_stat = _stat(path)
+def _regular_stat(path: Path, *, strict: bool = False) -> os.stat_result | None:
+    file_stat = _stat(path, strict=strict)
     return file_stat if file_stat and stat.S_ISREG(file_stat.st_mode) else None
 
 
@@ -94,10 +109,12 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def _children(path: Path) -> list[Path]:
+def _children(path: Path, *, strict: bool = False) -> list[Path]:
     try:
         return list(path.iterdir())
-    except OSError:
+    except OSError as error:
+        if strict and not isinstance(error, FileNotFoundError):
+            raise
         return []
 
 
@@ -252,6 +269,13 @@ def _line_is_complete(line: bytes, tokens: tuple[bytes, ...]) -> bool:
         return False
 
 
+def append_checkpoint(stream: Any, offset: int) -> bytes:
+    """Read the bounded consumed tail, leaving the stream positioned at offset."""
+    start = max(0, offset - APPEND_CHECK_BYTES)
+    stream.seek(start)
+    return stream.read(offset - start)
+
+
 def _task_id(value: Any) -> str | None:
     if isinstance(value, str) and value:
         return value
@@ -290,32 +314,41 @@ class _Transcript:
     offset: int = 0
     size: int = 0
     modified: int = 0
+    checkpoint: bytes = b""
     first: datetime | None = None
-    last: datetime | None = None
     activity: str = ""
     handed_back: datetime | None = None
+    runtime_phase: str = "unknown"
+    last_activity: datetime | None = None
+    last_execution: datetime | None = None
+    runtime_detail: str | None = None
+    runtime_messages: dict[str, bytes] = field(default_factory=dict)
+    runtime_input_ids: set[str] = field(default_factory=set)
     naming: _Naming = field(default_factory=_Naming)
     histories: dict[str, _TaskHistory] = field(default_factory=dict)
     workflows: dict[str, _WorkflowLaunch] = field(default_factory=dict)
     notifications: dict[str, tuple[str, datetime]] = field(default_factory=dict)
     agent_aliases: dict[str, str] = field(default_factory=dict)
+    response_usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    task_updates: dict[str, tuple[str, list[dict[str, Any]]]] = field(default_factory=dict)
 
     def _consume(self, line: bytes) -> None:
         timestamp_match = TIMESTAMP_PATTERN.search(line)
         timestamp = parse_time(timestamp_match.group(1).decode("ascii", errors="ignore")) if timestamp_match else None
-        if timestamp:
-            self.first = self.first or timestamp
-            self.last = timestamp
         self.naming.read(line)
-        if TURN_RECORD_PATTERN.search(line):
-            self.handed_back = None
-        if timestamp is None or not any(token in line for token in RELEVANT_TOKENS):
+        if b'"usage"' in line:
+            self._read_usage(line)
+        if timestamp is None:
             return
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
             return
         if not isinstance(record, dict):
+            return
+        self.first = self.first or timestamp
+        self._read_runtime(record)
+        if not any(token in line for token in RELEVANT_TOKENS):
             return
         if record.get("toolEndsTurn") is True:
             self.handed_back = timestamp
@@ -336,8 +369,11 @@ class _Transcript:
                 description = inputs.get("description")
                 self.activity = description if isinstance(description, str) else ""
                 if name == "TaskUpdate":
-                    self._read_task_update(inputs, timestamp)
+                    self._read_task_update(inputs, timestamp, item.get("id"))
             elif item.get("type") == "tool_result":
+                self._finish_task_update(item)
+                if item.get("is_error") is True:
+                    continue
                 for text in _texts(item.get("content")):
                     creation = CREATION_PATTERN.match(text)
                     if creation:
@@ -347,11 +383,135 @@ class _Transcript:
                     self._read_notifications(text, timestamp)
                     self._read_agent_alias(text)
 
-    def _read_task_update(self, inputs: dict[str, Any], timestamp: datetime) -> None:
+    def _read_runtime(self, record: dict[str, Any]) -> None:
+        timestamp = parse_time(record.get("timestamp"))
+        if timestamp is None or self.last_activity is not None and timestamp < self.last_activity:
+            return
+        kind, subtype = record.get("type"), record.get("subtype")
+        phase, detail = None, None
+        clear_pending_input = False
+        if kind == "result" and isinstance(subtype, str):
+            if subtype in RUNTIME_FAILURE_DETAILS:
+                phase, detail = "failed", RUNTIME_FAILURE_DETAILS[subtype]
+            elif subtype == "success":
+                phase = "idle"
+            clear_pending_input = phase is not None
+        elif kind == "system" and subtype == "session_state_changed":
+            state = record.get("state")
+            phase = RUNTIME_SESSION_PHASES.get(state) if isinstance(state, str) else None
+            clear_pending_input = phase == "idle"
+        elif kind == "system" and subtype == "turn_duration":
+            pending = [record.get(key) for key in ("pendingBackgroundAgentCount", "pendingWorkflowCount")]
+            phase = "working" if any(type(value) is int and value > 0 for value in pending) else "idle"
+            clear_pending_input = True
+        elif kind in ("user", "assistant") and record.get("isMeta") is not True:
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            texts = _texts(content)
+            blocks = [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+            tools = []
+            for item in blocks:
+                tool_use = (kind == "assistant" and item.get("type") == "tool_use" and isinstance(item.get("input"), dict)
+                            and all(isinstance(item.get(key), str) and item[key].strip() for key in ("id", "name")))
+                tool_result = (kind == "user" and item.get("type") == "tool_result" and isinstance(item.get("tool_use_id"), str)
+                               and item["tool_use_id"].strip())
+                if tool_use or tool_result:
+                    tools.append(item)
+            meaningful = bool(tools) or any(text.strip() for text in texts) or any(
+                item.get("type") == "thinking" and isinstance(item.get("thinking"), str) and item["thinking"].strip()
+                for item in blocks)
+            if meaningful:
+                interrupted = kind == "user" and any(text.strip() in INTERRUPTION_TEXTS for text in texts)
+                handed_back = record.get("toolEndsTurn") is True
+                response_ended = kind == "assistant" and message.get("stop_reason") == "end_turn"
+                phase = "working"
+                if interrupted:
+                    phase = "interrupted"
+                elif handed_back:
+                    phase = "idle"
+                elif response_ended:
+                    phase = "unknown"
+                clear_pending_input = handed_back or response_ended or interrupted
+                identifier = message.get("id")
+                if kind == "assistant" and isinstance(identifier, str) and identifier:
+                    payload = json.dumps((content, message.get("stop_reason"), record.get("toolEndsTurn")), sort_keys=True).encode()
+                    signature = hashlib.sha256(payload).digest()
+                    if self.runtime_messages.get(identifier) == signature:
+                        return
+                    self.runtime_messages[identifier] = signature
+                if kind == "user" and any(_prompt_title(text) for text in texts) and not any(item.get("type") == "tool_result" for item in blocks):
+                    self.runtime_input_ids.clear()
+                for item in tools:
+                    if kind == "user" and item.get("type") == "tool_result":
+                        self.runtime_input_ids.discard(item["tool_use_id"])
+                    elif kind == "assistant" and item.get("type") == "tool_use" and item.get("name") == "AskUserQuestion":
+                        questions = item["input"].get("questions")
+                        if (isinstance(questions, list) and questions
+                                and all(isinstance(question, dict) and isinstance(question.get("question"), str)
+                                        and question["question"].strip() for question in questions)):
+                            self.runtime_input_ids.add(item["id"])
+        if phase is not None:
+            if kind in ("user", "assistant"):
+                self.handed_back = None
+                self.last_execution = timestamp
+            if clear_pending_input:
+                self.runtime_input_ids.clear()
+            self.runtime_phase, self.last_activity, self.runtime_detail = phase, timestamp, detail
+
+    def runtime(self) -> dict[str, Any]:
+        if self.runtime_input_ids:
+            return {"phase": "unknown", "lastActivityAt": _iso(self.last_activity),
+                    "detail": "Recorded input request has no recorded response."}
+        return {"phase": self.runtime_phase, "lastActivityAt": _iso(self.last_activity), "detail": self.runtime_detail}
+
+    def _read_usage(self, line: bytes) -> None:
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            return
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            return
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return
+        identifier, usage = message.get("id"), message.get("usage")
+        if not isinstance(identifier, str) or not identifier or not isinstance(usage, dict):
+            return
+        details = usage.get("output_tokens_details")
+        values = {**usage, "reasoning_tokens": details.get("thinking_tokens") if isinstance(details, dict) else None}
+        valid = {key: value for key, value in values.items()
+                 if key in {"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                            "output_tokens", "reasoning_tokens"}
+                 and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+        if valid:
+            previous = self.response_usage.setdefault(identifier, {})
+            for key, value in valid.items():
+                previous[key] = max(previous.get(key, 0), value)
+
+    def token_usage(self) -> dict[str, int | None]:
+        totals = empty_token_usage()
+        if not self.response_usage:
+            return totals
+        fields = {"cachedInputTokens": "cache_read_input_tokens",
+                  "cacheWriteTokens": "cache_creation_input_tokens",
+                  "outputTokens": "output_tokens", "reasoningOutputTokens": "reasoning_tokens"}
+        for field_name, source_name in fields.items():
+            if all(source_name in response for response in self.response_usage.values()):
+                totals[field_name] = sum(response[source_name] for response in self.response_usage.values())
+        if (all("input_tokens" in response for response in self.response_usage.values())
+                and totals["cachedInputTokens"] is not None and totals["cacheWriteTokens"] is not None):
+            totals["inputTokens"] = (sum(response["input_tokens"] for response in self.response_usage.values())
+                                     + totals["cachedInputTokens"] + totals["cacheWriteTokens"])
+        if totals["inputTokens"] is not None and totals["outputTokens"] is not None:
+            totals["totalTokens"] = totals["inputTokens"] + totals["outputTokens"]
+        return totals
+
+    def _read_task_update(self, inputs: dict[str, Any], timestamp: datetime, tool_id: Any) -> None:
         task_id = _task_id(inputs.get("taskId"))
         if task_id is None:
             return
         history = self.histories.setdefault(task_id, _TaskHistory())
+        first_event = len(history.events)
         status = inputs.get("status")
         if status == "in_progress":
             history.started = history.started or timestamp
@@ -363,6 +523,24 @@ class _Transcript:
         progress = metadata.get("progress") if isinstance(metadata, dict) else None
         if _finite(progress) and 0 <= progress <= 100:
             history._record(timestamp, "progress", progress)
+        if isinstance(tool_id, str):
+            self.task_updates[tool_id] = (task_id, history.events[first_event:])
+
+    def _finish_task_update(self, result: dict[str, Any]) -> None:
+        identifier = result.get("tool_use_id")
+        if not isinstance(identifier, str):
+            return
+        pending = self.task_updates.pop(identifier, None)
+        if pending is None or result.get("is_error") is not True:
+            return
+        task_id, rejected = pending
+        history = self.histories[task_id]
+        rejected_ids = {id(event) for event in rejected}
+        history.events = [event for event in history.events if id(event) not in rejected_ids]
+        history.started = next((parse_time(event["time"]) for event in history.events
+                                if event["event"] == "started"), None)
+        history.ended = next((parse_time(event["time"]) for event in reversed(history.events)
+                              if event["event"] == "completed"), None)
 
     def _read_notifications(self, text: str, timestamp: datetime) -> None:
         for notification in NOTIFICATION_PATTERN.findall(text):
@@ -391,12 +569,12 @@ def _agent_state(transcript: _Transcript, notification: tuple[str, datetime] | N
 
     Activity after a notification means the agent was resumed, so that notification no longer applies."""
     status, notified = notification or ("running", None)
-    resumed = bool(notified and transcript.last and transcript.last > notified)
+    resumed = bool(notified and transcript.last_execution and transcript.last_execution > notified)
     if status not in LIVE_AGENT_STATUSES and not resumed:
-        return status, transcript.last or notified
+        return status, transcript.last_execution or notified
     if transcript.handed_back:
-        return "completed", transcript.last
-    quiet = transcript.last is not None and now - transcript.last >= SILENT_AFTER
+        return "completed", transcript.last_execution
+    quiet = transcript.last_execution is not None and now - transcript.last_execution >= SILENT_AFTER
     return ("silent" if quiet else "running"), None
 
 
@@ -426,20 +604,23 @@ class _Journal:
     offset: int = 0
     size: int = 0
     modified: int = 0
+    checkpoint: bytes = b""
     finished: int = 0
     started: dict[str, tuple[str, str]] = field(default_factory=dict)
     results: set[str] = field(default_factory=set)
 
     def _consume(self, line: bytes) -> None:
-        if RESULT_LINE_PATTERN.search(line):
-            self.finished += 1
-        if b'"agentId"' not in line:
+        if not RESULT_LINE_PATTERN.search(line) and b'"agentId"' not in line:
             return
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
             return
-        agent_id = record.get("agentId") if isinstance(record, dict) else None
+        if not isinstance(record, dict):
+            return
+        if record.get("type") == "result":
+            self.finished += 1
+        agent_id = record.get("agentId")
         if not isinstance(agent_id, str) or not agent_id:
             return
         if record.get("type") == "started":
@@ -471,6 +652,7 @@ class SourceStore:
     _transcripts: dict[Path, _Transcript] = field(default_factory=dict, init=False, repr=False)
     _identities: dict[Path, _Identity] = field(default_factory=dict, init=False, repr=False)
     _journals: dict[Path, _Journal] = field(default_factory=dict, init=False, repr=False)
+    _task_documents: dict[Path, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -494,15 +676,24 @@ class SourceStore:
             return [self._task(path, _Transcript()) for path in self._task_paths(self.root / "tasks" / list_id)]
 
     def state(self, list_id: str, now: datetime) -> dict[str, Any] | None:
-        """Return normalized tasks and agents, or None for an undiscovered session identifier."""
+        """Return normalized work and private runtime evidence, or None for an unknown session.
+
+        `_runtime` holds a phase, the last meaningful parent activity time and a
+        fixed safe failure detail. An ended assistant response alone leaves the
+        harness phase unknown; native state or a parent-turn event must confirm it.
+        """
         with self._lock:
+            if not isinstance(list_id, str) or not LIST_ID.fullmatch(list_id):
+                return None
             session = self._sessions().get(list_id)
             if session is None:
+                self._task_paths(self.root / "tasks" / list_id)
                 return None
             warnings: list[str] = []
             transcript = self._transcript(session.transcript) if session.transcript else _Transcript()
             listing = self._listing(session, now, warnings, read_identity=True)
-            tasks = [self._task(path, transcript) for path in self._task_paths(session.task_dir)]
+            tasks = [self._task(path, transcript) for path in self._task_paths(
+                session.task_dir or self.root / "tasks" / list_id)]
             agents = self._agents(session, transcript, now, warnings)
             workflows = self._workflows(session, transcript, now, warnings)
             assignable = {**agents, **{agent["id"]: agent for workflow in workflows for agent in workflow["agents"]}}
@@ -514,13 +705,15 @@ class SourceStore:
             for workflow in workflows:
                 workflow["agents"] = [agent for agent in workflow["agents"] if agent["id"] not in assigned]
             return {**listing, "transcriptUpdatedAt": _modified(session.transcript), "tasks": tasks,
+                    "provider": "claude", "sourceId": session.id, "tokenUsage": transcript.token_usage(),
+                    "_runtime": transcript.runtime(),
                     "agents": [agent for key, agent in agents.items() if key not in assigned],
                     "workflows": workflows, "warnings": warnings}
 
     def _sessions(self) -> dict[str, _Session]:
         sessions: dict[str, _Session] = {}
-        for task_dir in _children(self.root / "tasks"):
-            directory_stat = _stat(task_dir)
+        for task_dir in _children(self.root / "tasks", strict=True):
+            directory_stat = _stat(task_dir, strict=True)
             if directory_stat is None or not stat.S_ISDIR(directory_stat.st_mode):
                 continue
             session = sessions.setdefault(task_dir.name, _Session(task_dir.name))
@@ -528,18 +721,18 @@ class SourceStore:
             task_paths = self._task_paths(task_dir)
             session.task_count = len(task_paths)
             for path in task_paths:
-                file_stat = _stat(path)
+                file_stat = _stat(path, strict=True)
                 if file_stat:
                     session.modified = max(session.modified, file_stat.st_mtime)
-        for project_dir in _children(self.root / "projects"):
-            for path in _children(project_dir):
+        for project_dir in _children(self.root / "projects", strict=True):
+            for path in _children(project_dir, strict=True):
                 if path.suffix != ".jsonl":
                     continue
-                file_stat = _stat(path)
+                file_stat = _stat(path, strict=True)
                 if file_stat is None or not stat.S_ISREG(file_stat.st_mode):
                     continue
                 session = sessions.setdefault(path.stem, _Session(path.stem))
-                previous_stat = _stat(session.transcript) if session.transcript else None
+                previous_stat = _stat(session.transcript, strict=True) if session.transcript else None
                 if previous_stat is None or file_stat.st_mtime >= previous_stat.st_mtime:
                     session.transcript = path
                     session.transcript_modified = file_stat.st_mtime
@@ -547,7 +740,12 @@ class SourceStore:
         return sessions
 
     def _task_paths(self, task_dir: Path | None) -> list[Path]:
-        paths = [path for path in _children(task_dir) if path.suffix == ".json" and _regular_stat(path)] if task_dir else []
+        paths = [path for path in _children(task_dir, strict=True)
+                 if path.suffix == ".json" and _regular_stat(path, strict=True)] if task_dir else []
+        present = set(paths)
+        for path in list(self._task_documents):
+            if path.parent == task_dir and path not in present:
+                del self._task_documents[path]
         return sorted(paths, key=lambda path: path.name)
 
     def _listing(self, session: _Session, now: datetime, warnings: list[str], *,
@@ -570,7 +768,8 @@ class SourceStore:
         transcript_updated = (datetime.fromtimestamp(session.transcript_modified, UTC)
                               if session.transcript else None)
         title = title or session.id
-        return {"id": session.id, "title": title, "prompt": "" if naming.prompt == title else naming.prompt,
+        return {"id": session.id, "provider": "claude", "sourceId": session.id,
+                "title": title, "prompt": "" if naming.prompt == title else naming.prompt,
                 "project": naming.project, "updatedAt": _iso(updated), "recent": recent,
                 "active": session_active(transcript_updated, now), "chartable": chartable,
                 "taskCount": session.task_count, "agentCount": agent_count,
@@ -623,7 +822,7 @@ class SourceStore:
         return prefix, stream.tell(), True
 
     def _transcript(self, path: Path) -> _Transcript:
-        file_stat = _regular_stat(path)
+        file_stat = _regular_stat(path, strict=True)
         if file_stat is None:
             self._transcripts.pop(path, None)
             return _Transcript()
@@ -636,14 +835,19 @@ class SourceStore:
             self._transcripts[path] = cached
         try:
             with path.open("rb") as stream:
+                if cached.offset and append_checkpoint(stream, cached.offset) != cached.checkpoint:
+                    cached = _Transcript(identity=identity)
+                    self._transcripts[path] = cached
                 stream.seek(cached.offset)
                 while line := stream.readline():
                     if not _line_is_complete(line, TRANSCRIPT_TOKENS):
                         break
                     cached._consume(line)
                     cached.offset = stream.tell()
-        except OSError:
-            return cached
+                cached.checkpoint = append_checkpoint(stream, cached.offset)
+        except FileNotFoundError:
+            self._transcripts.pop(path, None)
+            return _Transcript()
         cached.size, cached.modified = file_stat.st_size, file_stat.st_mtime_ns
         naming = replace(cached.naming)
         self._identities[path] = _Identity(identity, cached.size, cached.modified, naming, cached.offset, True, naming)
@@ -653,6 +857,11 @@ class SourceStore:
         warnings: list[str] = []
         document = _read_json(path, warnings)
         readable = bool(document)
+        if readable:
+            self._task_documents[path] = deepcopy(document)
+        elif _regular_stat(path) is not None and path in self._task_documents:
+            document = deepcopy(self._task_documents[path])
+            warnings.append("Using the last readable task state")
         task_id = _task_id(document.get("id")) or path.stem
         metadata = document.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -750,7 +959,7 @@ class SourceStore:
         return start + (end - start) * min(read.finished / planned, 1)
 
     def _journal(self, path: Path) -> _Journal | None:
-        file_stat = _regular_stat(path)
+        file_stat = _regular_stat(path, strict=True)
         if file_stat is None:
             self._journals.pop(path, None)
             return None
@@ -762,13 +971,18 @@ class SourceStore:
             self._journals[path] = cached
         try:
             with path.open("rb") as stream:
+                if cached.offset and append_checkpoint(stream, cached.offset) != cached.checkpoint:
+                    cached = _Journal(identity=identity)
+                    self._journals[path] = cached
                 stream.seek(cached.offset)
                 while line := stream.readline():
                     if not _line_is_complete(line, (b'"result"', b'"agentId"')):
                         break
                     cached._consume(line)
                     cached.offset = stream.tell()
-        except OSError:
+                cached.checkpoint = append_checkpoint(stream, cached.offset)
+        except FileNotFoundError:
+            self._journals.pop(path, None)
             return None
         cached.size, cached.modified = file_stat.st_size, file_stat.st_mtime_ns
         return cached
@@ -832,7 +1046,7 @@ class SourceStore:
             "agentType": self._text(metadata, "agentType", "", warnings),
             "worktreeBranch": self._text(metadata, "worktreeBranch", "", warnings),
             "started": _iso(transcript.first), "ended": _iso(ended),
-            "lastActivityAt": _iso(transcript.last), "activity": transcript.activity,
+            "lastActivityAt": _iso(transcript.last_execution), "activity": transcript.activity,
             "status": status,
         }
 
@@ -858,13 +1072,13 @@ class SourceStore:
             for agent_id in [*journal.started, *sorted(_agent_ids(run) - set(journal.started))]:
                 transcript = self._transcript(run / f"agent-{agent_id}.jsonl")
                 firsts += [transcript.first] if transcript.first else []
-                lasts += [transcript.last] if transcript.last else []
+                lasts += [transcript.last_execution] if transcript.last_execution else []
                 if agent_id in journal.results:
-                    status, ended = "completed", transcript.last
+                    status, ended = "completed", transcript.last_execution
                 else:
                     status, ended = _agent_state(transcript, None, now)
                 if run_ended and ended is None:
-                    status, ended = ("stopped" if run_status == "completed" else run_status), transcript.last
+                    status, ended = ("stopped" if run_status == "completed" else run_status), transcript.last_execution
                 agent = self._agent(run, agent_id, transcript, status, ended, warnings)
                 label, phase = journal.started.get(agent_id, ("", ""))
                 agent.update(description=label or agent["description"], phase=phase, workflow=name)
