@@ -8,6 +8,10 @@ Readers consume complete records by offset. Replacement, shrinkage, same-length 
 
 External runs require explicit endings; processes and logs prove observations, never completion. Invalid metadata warns and preserves unknown estimates; unknown keys cannot schedule work.
 
+[codex.py](live_gantt/codex.py) indexes sessions under `CODEX_HOME` or its default; archives load on selection. Changed files re-read bounded metadata before identifying sessions. Parent metadata joins children; orphans remain selectable. Native turns control activity; recorded failures remain failures. Native plan events and acknowledged `update_plan` calls supply steps. Turn completion never completes a plan. Estimates, percentages and dependencies are not inferred.
+
+Root tokens exclude children: Codex uses cumulative totals; Claude deduplicates responses. Missing categories stay null; overlaps never add.
+
 ## Quota observations and forecasts
 
 [usage.py](live_gantt/usage.py) owns quota validation, identity, freshness and forecasts. Quota reads bounded recent Codex tails, excluding archives, plus optional Claude captures. Failed reads still age cached quota without blocking the other provider. Failures retain the last success and timestamp plus a sanitized error; replays cannot mask failure. Native roles and durations remain intact; tokens or money never imply percentages. Complete observations replace buckets; missing windows are unavailable. Status is available with any fresh window, stale with only stale windows, otherwise unavailable.
