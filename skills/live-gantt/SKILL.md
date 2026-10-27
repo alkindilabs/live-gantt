@@ -7,6 +7,8 @@ description: Use when creating or updating Claude Code tasks with TaskCreate or 
 
 Use Claude Code's task list as the plan. Create tasks with an estimate and lane so Live Gantt can schedule them, then keep status, progress, agent assignments and external runs current through TaskUpdate. Read the tool's current schema before calling it; the examples below describe tool inputs.
 
+To open the chart, use `/live-gantt:open` and give the user the address returned by its shared discovery command. The service selects an available port, so do not assume port 4791. Discovery verifies the current operating-system user's server without requesting provider data. Sources and discovery do not combine local accounts; loopback access is not user authentication.
+
 ## Task metadata contract
 
 Agents write these fields through Claude Code's task metadata. Live Gantt never modifies tasks or transcripts. Unknown metadata keys do not affect scheduling. Malformed known values produce a warning on that task and fall back independently, so one bad field does not hide the session.

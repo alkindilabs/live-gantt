@@ -2,7 +2,7 @@
 
 Live Gantt shows local Claude Code and Codex sessions, their recorded token use, and account quota with reset times and current-pace estimates. For Claude Code task plans, it also shows progress and when each milestone is expected to finish. The overview pairs reported progress with an expected finish (50th-percentile planning estimate, P50) and a later estimate (90th-percentile planning estimate, P90). The timeline explains that outlook through tasks, agents, dependencies and recorded work. It fills the workspace height below the session header; account usage and plan progress scroll independently in the Overview sidebar. Narrow screens switch between Overview and the timeline. It runs on your machine from local files and makes no provider requests. The task list is the plan; there is no separate plan file.
 
-Requires Python 3.11 or later. Hooks started under an older `python3`, as Codex's background daemon does on macOS, re-run under Homebrew's Python when it is installed. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service. Live Gantt supports Claude Code and local Codex desktop and command-line sessions on macOS and Linux. Ordinary ChatGPT or Claude web conversations and Cowork are outside this local source boundary. Codex activity on a ChatGPT account is included when recorded locally.
+Requires Python 3.11 or later. Hooks, installation scripts and the open helper started under an older `python3`, as Codex's background daemon does on macOS, re-run under Homebrew's Python when it is installed. Uses only its standard library and one static page with Hypertext Markup Language (HTML), Cascading Style Sheets (CSS) and JavaScript. No dependencies or build step are needed. Login startup supports macOS with launchd and Linux with a systemd user service. Live Gantt supports Claude Code and local Codex desktop and command-line sessions on macOS and Linux. Ordinary ChatGPT or Claude web conversations and Cowork are outside this local source boundary. Codex activity on a ChatGPT account is included when recorded locally.
 
 ## Install as a Claude Code plugin
 
@@ -25,7 +25,7 @@ If you installed from the Bench and Wrench marketplace instead, the plugin is `l
 
 Restart Claude Code to load the updated plugin. Its SessionStart hook updates an existing local service when the plugin version advances. For local development, use the checkout's path instead of `alkindilabs/live-gantt` when adding the marketplace.
 
-The open command checks the local server. If it is not running, Claude explains installation and asks before running the installer, then gives you the chart address. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing, and its freshness hooks keep the plan from going stale (see [Freshness](#freshness)).
+The open command discovers and verifies the server belonging to your operating-system user, then gives you its current address. It also finds existing current-user services on the original port without requiring a reinstall. If discovery fails, Claude reports the diagnostic without claiming the server is absent or giving an unverified address. If you want setup, Claude explains the account-local installation and asks before running the installer. The plugin's skill guides task planning; its TaskCreate hook reminds Claude when scheduling fields are missing, and its freshness hooks keep the plan from going stale (see [Freshness](#freshness)).
 
 Installation copies the application out of the replaceable plugin cache into stable per-user storage:
 
@@ -44,7 +44,13 @@ From a checkout, register the same per-user service:
 ./scripts/install.sh
 ```
 
-Open <http://127.0.0.1:4791>. No administrator privileges are required. Explicit `CLAUDE_CONFIG_DIR` and `CODEX_HOME` values are captured during installation and retained across updates; reinstall with a new value to change either source root. An explicitly empty value clears that override. Reinstall from the updated checkout to update a standalone installation.
+Open the address printed by the installer. To retrieve the current address later, run this from the checkout:
+
+```sh
+python3 -B -m live_gantt.python_support live_gantt.open
+```
+
+The helper prints an address only after verifying that the server belongs to your operating-system user. No administrator privileges are required. Explicit `CLAUDE_CONFIG_DIR` and `CODEX_HOME` values are captured during installation and retained across updates; reinstall with a new value to change either source root. An explicitly empty value clears that override. Reinstall from the updated checkout to update a standalone installation.
 
 To run without a login service:
 
@@ -54,11 +60,15 @@ python3 -B -m live_gantt
 
 The foreground command reads `CLAUDE_CONFIG_DIR` and `CODEX_HOME` from its environment, falling back to each provider’s standard per-user directory. It also reads optional Claude quota captures from the application’s stable storage. No installation or provider settings changes are required.
 
-To use another port for this foreground process, pass `--port 4792`. Stop it with Control-C. The `-B` flag prevents bytecode caches.
+By default, the server tries its saved port, then port 4791, then a free port assigned by the operating system. It binds the port before saving its address in private per-user storage, so different local accounts can each run a service without sharing sources or colliding on one fixed port. A per-user lock coordinates startup within one account. The saved port survives restarts and upgrades. Use the printed address or the open helper instead of assuming port 4791.
+
+To require one specific port for this foreground process, pass `--port 4792`. An unavailable explicit port fails rather than selecting another. Stop it with Control-C. The `-B` flag prevents bytecode caches.
 
 ## Privacy
 
-The chart runs locally. The server binds only IPv4 loopback and accepts only `127.0.0.1` and `localhost` Host headers with its port. It sends no cross-origin resource sharing headers; source text is rendered as text, not executable markup. There are no analytics or remote assets. It makes no outbound requests.
+The chart runs locally. The server binds only IPv4 loopback and accepts only `127.0.0.1` and `localhost` Host headers with its port. It sends no cross-origin resource sharing headers; source text is rendered as text, not executable markup. There are no analytics or remote assets. It makes no outbound requests. Loopback is not user authentication: another local account able to reach the port can still request the chart.
+
+Provider sources and server discovery are scoped to the operating-system user; running multiple services does not combine accounts. The open helper reads private per-user address state, verifies listener ownership and checks the page without requesting provider data. It never offers another user's server as yours.
 
 The sources are Claude Code’s configuration directory and Codex’s local session directory; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` select alternate roots. Live Gantt never extracts credentials or changes provider settings. The service writes its own installed files and logs, never tasks or transcripts. Opt-in Claude quota capture stores only validated quota fields, a source session identifier and observation times in application-owned storage; raw status-line input, prompts and credentials are not saved. The last opened session keeps syncing for ten minutes after chart tabs close; reopening restores its current view. Quota capture history is an application-owned file with owner-only (`0600`) permissions and atomic replacement, bounded to 512 records and one mebibyte. It preserves original observation times, quota resets and bucket boundaries. A corrupt or unwritable file leaves the chart and your status line working.
 
@@ -245,7 +255,7 @@ Stop and unregister the per-user service from a checkout or plugin directory:
 ./scripts/uninstall.sh
 ```
 
-It stops the process and removes the service definition, copied application, recorded configuration and installed-version marker. Removing the marker keeps the SessionStart hook from reinstalling a service you chose to remove. Logs and Claude Code files are retained. On macOS, logs are in the user's Library Logs directory; on Linux, use `journalctl --user -u live-gantt.service`.
+It stops the process and removes the service definition, copied application, recorded source configuration and installed-version marker. Removing the marker keeps the SessionStart hook from reinstalling a service you chose to remove. Logs, Claude Code files and the inactive endpoint record are retained; reinstalling can reuse the saved port. On macOS, logs are in the user's Library Logs directory; on Linux, use `journalctl --user -u live-gantt.service`.
 
 For a plugin installation, also run in Claude Code:
 

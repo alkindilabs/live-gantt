@@ -28,6 +28,7 @@ CODEX_LAUNCHER_PATH = Path(".local/bin/live-gantt-codex")
 CODEX_LAUNCHER_HEADER = "#!/bin/sh\n# Managed by live-gantt: codex launcher v1\n"
 LAUNCHD_TEMPLATE = Path("launchd/local.live-gantt.plist")
 SYSTEMD_TEMPLATE = Path("systemd/live-gantt.service")
+LAUNCHD_LABEL = "local.live-gantt"
 BOOTOUT_POLL_SECONDS = 0.1
 BOOTOUT_WAIT_SECONDS = 10
 
@@ -60,10 +61,20 @@ def installation_settings(environ, previous):
     return settings
 
 
+def service_identifier(system):
+    """Return the service identity shared by registration and legacy endpoint discovery."""
+    if system == "Darwin":
+        return LAUNCHD_LABEL
+    if system == "Linux":
+        return SYSTEMD_TEMPLATE.name
+    raise ValueError(f"Unsupported operating system: {system}")
+
+
 def launchd_configuration(plugin_root, directory, python, log, settings):
     """Render the launchd template for the stable copy, Python interpreter and source root."""
     with (plugin_root / LAUNCHD_TEMPLATE).open("rb") as stream:
         config = plistlib.load(stream)
+    config["Label"] = service_identifier("Darwin")
     config["ProgramArguments"][0] = str(python)
     config["WorkingDirectory"] = str(directory)
     config["StandardOutPath"] = config["StandardErrorPath"] = str(log)
@@ -80,8 +91,9 @@ def _systemd_quote(value):
 
 def systemd_configuration(plugin_root, directory, python, settings):
     """Render the systemd user unit with escaped literal paths and source configuration."""
+    service_environment = {**settings, "XDG_DATA_HOME": str(directory.parent)}
     environment = "\n".join(
-        f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in settings.items()
+        f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in service_environment.items()
     )
     replacements = {
         "@PYTHON@": _systemd_quote(python),
@@ -129,12 +141,10 @@ def _wait_until_launchd_forgets(service):
         time.sleep(BOOTOUT_POLL_SECONDS)
 
 
-def _service_target(system, plugin_root, home, environ):
+def _service_target(system, home, environ):
+    identifier = service_identifier(system)
     if system == "Darwin":
-        with (plugin_root / LAUNCHD_TEMPLATE).open("rb") as stream:
-            identifier = plistlib.load(stream)["Label"]
         return identifier, home / "Library" / "LaunchAgents" / f"{identifier}.plist"
-    identifier = SYSTEMD_TEMPLATE.name
     config_root = _xdg_directory(environ, "XDG_CONFIG_HOME", home / ".config")
     return identifier, config_root / "systemd" / "user" / identifier
 
@@ -188,7 +198,7 @@ def install(plugin_root):
     manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
     version = manifest["version"]
     settings = installation_settings(os.environ, _read_settings(directory))
-    identifier, target = _service_target(system, plugin_root, home, os.environ)
+    identifier, target = _service_target(system, home, os.environ)
     python = service_python(shutil.which, sys.executable)
     codex_launcher = home / CODEX_LAUNCHER_PATH
     _validate_codex_launcher(codex_launcher)
@@ -230,7 +240,7 @@ def uninstall(plugin_root):
     system = platform.system()
     home = Path.home()
     directory = installation_directory(system, home, os.environ)
-    identifier, target = _service_target(system, plugin_root, home, os.environ)
+    identifier, target = _service_target(system, home, os.environ)
     if system == "Linux":
         subprocess.run(
             ["systemctl", "--user", "disable", "--now", identifier], check=False,
@@ -264,9 +274,13 @@ def main():
     try:
         if args.action == "install":
             install(plugin_root)
-            from .server import DEFAULT_PORT, LOOPBACK
+            from .endpoint import wait_for_server_url
 
-            print(f"Live Gantt installed: http://{LOOPBACK}:{DEFAULT_PORT}")
+            address = wait_for_server_url()
+            if address is None:
+                raise OSError("service registered, but no running server could be verified for this account; "
+                              "check its service logs")
+            print(f"Live Gantt installed: {address}")
         else:
             uninstall(plugin_root)
             print("Live Gantt uninstalled. Claude Code files and service logs are retained.")

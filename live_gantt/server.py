@@ -20,14 +20,13 @@ from .sources import LIST_ID, parse_time
 from .providers import CODEX_PREFIX, ProviderStore
 from .liveness import unknown_liveness
 from .monitoring import summarize
+from .endpoint import DEFAULT_PORT, LOOPBACK
 
 
-DEFAULT_PORT = 4791
 POLL_SECONDS = 2.0
 BACKGROUND_SESSION_SECONDS = 600.0
 HEARTBEAT_SECONDS = 15.0
 SOCKET_TIMEOUT_SECONDS = 20.0
-LOOPBACK = "127.0.0.1"
 STATIC = Path(__file__).with_name("static")
 STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                 "/style.css": ("style.css", "text/css; charset=utf-8"),

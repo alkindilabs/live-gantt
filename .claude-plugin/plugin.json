@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "live-gantt",
   "displayName": "Live Gantt",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A local, live Gantt chart of Claude Code tasks, agents, external runs, and milestone forecasts.",
   "keywords": ["gantt", "tasks", "agents", "planning", "local"],
   "author": {

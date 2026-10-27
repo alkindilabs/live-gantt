@@ -17,6 +17,7 @@ from live_gantt.python_support import require_supported_python
 require_supported_python()
 
 from live_gantt.installation import VERSION_FILENAME, installation_directory
+from live_gantt.endpoint import discover_server_url
 
 
 VERSION_PATTERN = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -60,6 +61,12 @@ def main() -> None:
     try:
         installed_root = installation_directory(platform.system(), Path.home(), os.environ)
         update_installation(PLUGIN_ROOT, installed_root)
+        address = discover_server_url(directory=installed_root)
+        if address is not None:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": f"Live Gantt for this account: {address}",
+            }}))
     except (OSError, ValueError):
         return
 
