@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import select
 import socket
+from socketserver import TCPServer
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -283,6 +284,12 @@ class LocalServer(ThreadingHTTPServer):
         self.monitor = Monitor(ProviderStore(root, codex_root=codex_root, usage_root=usage_root),
                                poll_seconds, heartbeat_seconds)
         super().__init__((LOOPBACK, port), Handler)
+
+    def server_bind(self):
+        """Bind the numeric loopback address without resolving a hostname."""
+        TCPServer.server_bind(self)
+        self.server_name = LOOPBACK
+        self.server_port = self.server_address[1]
 
     def server_close(self):
         """Release listeners and stop source synchronization."""

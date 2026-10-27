@@ -61,6 +61,14 @@ class ServerTests(unittest.TestCase):
             "metadata": {"estimate": {"low": 1, "likely": 2, "high": 3}, **metadata},
         }))
 
+    def test_loopback_startup_never_resolves_a_hostname(self):
+        with patch("socket.getfqdn", side_effect=AssertionError("Loopback startup must not use DNS")):
+            server = make_server(self.root, port=0,
+                                 codex_root=self.root / "codex", usage_root=self.root / "usage")
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_name, "127.0.0.1")
+        self.assertEqual(server.server_port, server.server_address[1])
+
     def open_stream(self, path="/events?list=session-one"):
         connection = self.connection()
         connection.request("GET", path)
