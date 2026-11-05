@@ -155,9 +155,11 @@ The chart is only useful if it is never silently out of date, so one set of rule
 2. an in-progress task file has not changed for 15 minutes while the session transcript changed within the last 5 minutes;
 3. an in-progress task has no numeric `progress`;
 4. a run that has not ended names a `log` that is missing, or whose log has not changed for 10 minutes while the session is active;
-5. a run that has not ended declares a `pid` that no longer exists, and its log, if it has one, shows no life.
+5. a run that has not ended declares a `pid` that no longer exists, and its log, if it has one, shows no life;
+6. a run's `started` or `ended` is more than 5 minutes after the current time;
+7. a completed task has a run that has not ended.
 
-Completed and deleted tasks and task files that cannot be read never produce findings. When findings exist, **Details** lists them; each in-progress task shows how long ago it was updated and, for a run finding, what was declared against what was observed, for example `declared running; observed: silent 23 min`.
+Completed tasks are checked only for rule 7; deleted tasks and task files that cannot be read never produce findings. When findings exist, **Details** lists them; each in-progress task shows how long ago it was updated and, for a run finding, what was declared against what was observed, for example `declared running; observed: silent 23 min`.
 
 The plugin enforces the same rules with [its freshness hook](hooks/freshness.py) on three events:
 
@@ -193,7 +195,7 @@ Projected tasks include `projectedSegments`, an ordered list of `{start, end}` w
 
 `tokenUsage` contains `inputTokens`, `cachedInputTokens`, `cacheWriteTokens`, `outputTokens`, `reasoningOutputTokens` and `totalTokens`, each a nonnegative integer or `null`.
 
-`freshness` is `{stale, findings, sinceChangeSeconds, sessionActive}`. Each finding has `rule` (`missing-schedule`, `stale-progress`, `missing-progress`, `silent-run`, `process-gone` or `future-run`), `taskId` and a plain-sentence `message`; run findings add `observed`, such as `silent 23 min`, `log not found`, `process gone` or `90 min ahead`. `sinceChangeSeconds` counts from the newest task-file change and is `null` without task files. Each task carries `updatedAt`, its file's modification time, and `readable`. Each run carries `logUpdatedAt`, `pid` and `pidAlive`, which is `null` without a `pid` or once the run has ended.
+`freshness` is `{stale, findings, sinceChangeSeconds, sessionActive}`. Each finding has `rule` (`missing-schedule`, `stale-progress`, `missing-progress`, `silent-run`, `process-gone`, `future-run` or `unclosed-run`), `taskId` and a plain-sentence `message`; run findings add `observed`, such as `silent 23 min`, `log not found`, `process gone`, `90 min ahead` or `task completed`. `sinceChangeSeconds` counts from the newest task-file change and is `null` without task files. Each task carries `updatedAt`, its file's modification time, and `readable`. Each run carries `logUpdatedAt`, `pid` and `pidAlive`, which is `null` without a `pid` or once the run has ended.
 
 Local sources are checked every two seconds for connected views and the last opened session, even when its tab is hidden or closed. Failed reads retain the last complete snapshot and retry automatically; provider discovery failures are isolated. Restarting the service reconstructs recorded progress from disk. Claude reads task files, transcript history and workflow journals; Codex reads native plan updates and turn activity. Unrecorded progress cannot be inferred, and ending a Codex turn does not complete its plan.
 

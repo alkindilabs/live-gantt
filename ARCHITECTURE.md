@@ -38,7 +38,7 @@ Milestones weight completed tasks fully, in-progress tasks proportionally, pendi
 
 ## Plan freshness
 
-[freshness.py](live_gantt/freshness.py) owns pure `assess(tasks, transcript_updated, now)` and stale-plan rules. It returns findings, session activity and age of the latest task-file change. Discovery shares `session_active`; browser and hooks never recreate rules. Findings cover missing schedules or numeric progress, old progress during activity, quiet/missing run logs, and exited processes without later logs, and run times more than five minutes ahead of the read clock. Written logs outweigh exited/reused process identifiers; process-exit findings replace quiet-log findings for that run. Completed, deleted and unreadable tasks yield no findings, avoiding stale reports during partial writes.
+[freshness.py](live_gantt/freshness.py) owns pure `assess(tasks, transcript_updated, now)` and stale-plan rules. It returns findings, session activity and age of the latest task-file change. Discovery shares `session_active`; browser and hooks never recreate rules. Findings cover missing schedules or numeric progress, old progress during activity, quiet/missing run logs, exited processes without later logs, run times more than five minutes ahead of the read clock, and runs left open on completed tasks. Written logs outweigh exited/reused process identifiers; process-exit findings replace quiet-log findings for that run. Deleted and unreadable tasks yield no findings, avoiding stale reports during partial writes.
 
 ## Harness liveness
 

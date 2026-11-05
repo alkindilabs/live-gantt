@@ -14,7 +14,8 @@ ACTIVE_SESSION_MINUTES = 5
 SILENT_RUN_MINUTES = 10
 FUTURE_RUN_TOLERANCE_MINUTES = 5
 SCHEDULING_FIELDS = ("estimate", "lane")
-FINISHED_STATUSES = frozenset({"completed", "deleted"})
+COMPLETED = "completed"
+DELETED = "deleted"
 SECONDS_PER_MINUTE = 60
 
 MISSING_SCHEDULE = "missing-schedule"
@@ -23,6 +24,7 @@ MISSING_PROGRESS = "missing-progress"
 SILENT_RUN = "silent-run"
 PROCESS_GONE = "process-gone"
 FUTURE_RUN = "future-run"
+UNCLOSED_RUN = "unclosed-run"
 
 
 def _time(value: str | None) -> datetime | None:
@@ -87,6 +89,20 @@ def _future_run_findings(task: dict, run: dict, now: datetime) -> list[dict]:
                          f"{minutes} min ahead")]
 
 
+def _unclosed_run_findings(task: dict) -> list[dict]:
+    return [_run_finding(UNCLOSED_RUN, task, f"Task #{task['id']} is completed but its run '{run['label']}' "
+                         "has not ended; record the observed end.", "task completed")
+            for run in task["runs"] if not run["ended"]]
+
+
+def _plan_findings(task: dict, session_active: bool, now: datetime) -> list[dict]:
+    if task["status"] == COMPLETED:
+        return _unclosed_run_findings(task)
+    if task["status"] == DELETED:
+        return []
+    return _task_findings(task, session_active, now)
+
+
 def _task_findings(task: dict, session_active: bool, now: datetime) -> list[dict]:
     findings = [finding for run in task["runs"]
                 for finding in _run_findings(task, run, session_active, now) + _future_run_findings(task, run, now)]
@@ -116,22 +132,18 @@ def session_active(transcript_updated: datetime | None, now: datetime) -> bool:
 def assess(tasks: list[dict], transcript_updated: datetime | None, now: datetime) -> dict:
     """Judge a session's plan at ``now``.
 
-    ``transcript_updated`` is the parent transcript's last change, judged by ``session_active``. Unreadable task files,
-    completed and deleted tasks produce no findings. A run that has not ended is stale when
-    its log is missing, when its log has not changed for ``SILENT_RUN_MINUTES`` while the
-    session is active, or when its declared process has exited and its log, if any, shows
-    no life; a log still being written outweighs an exited or reused process identifier. ``sinceChangeSeconds`` measures
+    ``transcript_updated`` is the parent transcript's last change, judged by ``session_active``. Unreadable task files
+    and deleted tasks produce no findings; a completed task's only findings are runs that have not ended. On an
+    unfinished task, a run that has not ended is stale when its log is missing, when its log has not changed for
+    ``SILENT_RUN_MINUTES`` while the session is active, or when its declared process has exited and its log, if
+    any, shows no life; a log still being written outweighs an exited or reused process identifier. ``sinceChangeSeconds`` measures
     from the newest task file change and is ``None`` without task files. The result is
     JSON-ready: ``{stale, findings: [{rule, taskId, message}], sinceChangeSeconds,
     sessionActive}``; run findings add ``observed``, a short phrase for what was seen.
     """
     active = session_active(transcript_updated, now)
     readable = [task for task in tasks if task["readable"]]
-    findings = [
-        finding
-        for task in readable if task["status"] not in FINISHED_STATUSES
-        for finding in _task_findings(task, active, now)
-    ]
+    findings = [finding for task in readable for finding in _plan_findings(task, active, now)]
     changes = [moment for moment in (_time(task["updatedAt"]) for task in readable) if moment]
     since_change = int((now - max(changes)).total_seconds()) if changes else None
     return {"stale": bool(findings), "findings": findings,

@@ -69,7 +69,8 @@ The plan must never be silently stale. Live Gantt reports a finding when:
 3. an in-progress task has no numeric `progress`;
 4. a run without `ended` names a `log` that is missing, or that has not changed for 10 minutes while the session is active;
 5. a run without `ended` declares a `pid` that is no longer running, and its log, if any, shows no life;
-6. a run's `started` or `ended` is more than 5 minutes after the current time: record observed times in UTC, not planned or local ones.
+6. a run's `started` or `ended` is more than 5 minutes after the current time: record observed times in UTC, not planned or local ones;
+7. a completed task has a run without `ended`: close every run before marking its task completed.
 
 A Stop hook blocks the end of a turn while findings exist (at most once per 5 minutes), and prompts and tool calls carry a reminder. Fix each finding with TaskUpdate: set the missing fields, record real progress, or close a run that finished, failed or hung by setting its `ended` time. Updating progress only to silence a reminder makes the chart lie; record what was observed.
 
