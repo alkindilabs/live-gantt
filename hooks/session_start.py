@@ -16,7 +16,7 @@ from live_gantt.python_support import require_supported_python
 
 require_supported_python()
 
-from live_gantt.installation import VERSION_FILENAME, installation_directory
+from live_gantt.installation import VERSION_FILENAME, installation_directory, release_version
 from live_gantt.endpoint import discover_server_url
 
 
@@ -37,10 +37,7 @@ def update_installation(plugin_root: Path, installed_root: Path) -> None:
         installed_version = _version((installed_root / VERSION_FILENAME).read_text())
         if installed_version is None:
             return
-        manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
-        if not isinstance(manifest, dict):
-            return
-        plugin_version = _version(manifest.get("version"))
+        plugin_version = _version(release_version(plugin_root))
         if plugin_version is None or installed_version >= plugin_version:
             return
         subprocess.run(

@@ -15,6 +15,7 @@ from live_gantt.installation import (
     installation_settings,
     install,
     launchd_configuration,
+    release_version,
     service_python,
     systemd_configuration,
     uninstall,
@@ -145,6 +146,18 @@ class InstalledCodexCommandTests(unittest.TestCase):
 
     def test_install_rejects_a_command_directory(self):
         self.assert_conflicting_command_is_preserved("directory")
+
+    def test_installed_copy_reports_the_release_it_was_installed_from(self):
+        installed = installation_directory("Linux", self.home, self.environment)
+        manifest = self.plugin / ".claude-plugin" / "plugin.json"
+        for version in ("9.8.7", "9.8.8"):
+            manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "version": version}))
+            self.change_installation(install)
+            self.assertEqual(release_version(installed), version)
+        self.change_installation(uninstall)
+        self.assertIsNone(release_version(installed))
+        manifest.write_text("{")
+        self.assertIsNone(release_version(self.plugin))
 
     def test_uninstall_removes_only_the_owned_command(self):
         self.change_installation(install)
