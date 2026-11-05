@@ -331,6 +331,7 @@ class _Transcript:
     agent_aliases: dict[str, str] = field(default_factory=dict)
     response_usage: dict[str, dict[str, int]] = field(default_factory=dict)
     task_updates: dict[str, tuple[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    stop_requests: dict[str, str] = field(default_factory=dict)
 
     def _consume(self, line: bytes) -> None:
         timestamp_match = TIMESTAMP_PATTERN.search(line)
@@ -370,8 +371,11 @@ class _Transcript:
                 self.activity = description if isinstance(description, str) else ""
                 if name == "TaskUpdate":
                     self._read_task_update(inputs, timestamp, item.get("id"))
+                elif name == "TaskStop":
+                    self._read_stop_request(inputs, item.get("id"))
             elif item.get("type") == "tool_result":
                 self._finish_task_update(item)
+                self._finish_stop(item, timestamp)
                 if item.get("is_error") is True:
                     continue
                 for text in _texts(item.get("content")):
@@ -541,6 +545,17 @@ class _Transcript:
                                 if event["event"] == "started"), None)
         history.ended = next((parse_time(event["time"]) for event in reversed(history.events)
                               if event["event"] == "completed"), None)
+
+    def _read_stop_request(self, inputs: dict[str, Any], tool_id: Any) -> None:
+        task_id = inputs.get("task_id")
+        if isinstance(tool_id, str) and isinstance(task_id, str) and task_id:
+            self.stop_requests[tool_id] = task_id
+
+    def _finish_stop(self, result: dict[str, Any], timestamp: datetime) -> None:
+        """Record a confirmed stop as its task's terminal observation: a stopped task never sends a notification."""
+        task_id = self.stop_requests.pop(result.get("tool_use_id"), None)
+        if task_id is not None and result.get("is_error") is not True:
+            self.notifications[task_id] = ("stopped", timestamp)
 
     def _read_notifications(self, text: str, timestamp: datetime) -> None:
         for notification in NOTIFICATION_PATTERN.findall(text):
