@@ -599,6 +599,23 @@ class SourceStoreTests(unittest.TestCase):
         workflow, = self.state()["workflows"]
         self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("failed", "2026-10-15T11:55:00Z")])
 
+    def test_a_resumed_workflow_starts_at_its_first_launch_and_ends_with_its_last(self):
+        self.append(self.launch("2026-10-15T11:00:01Z", "wf_resumed", "first-task", "lane-flow", "Run the lane"),
+                    self.tool("2026-10-15T11:10:00Z", "TaskStop", {"task_id": "first-task"}, "stop"),
+                    self.result("2026-10-15T11:10:01Z", "Successfully stopped task: first-task", "stop"),
+                    self.launch("2026-10-15T11:20:01Z", "wf_resumed", "second-task", "lane-flow", "Run the lane"),
+                    {"type": "user", "timestamp": "2026-10-15T11:40:00Z", "message": {"content": self.notification("second-task")}})
+        self.workflow("wf_resumed", [{"type": "launched"}, {"type": "started", "key": "k", "agentId": "first", "label": "fix", "phase": "Fix"},
+                                     {"type": "failed", "key": "k", "agentId": "first"}, {"type": "launched"},
+                                     {"type": "started", "key": "k", "agentId": "retry", "label": "fix", "phase": "Fix"},
+                                     {"type": "result", "key": "k", "agentId": "retry", "result": {}}], {
+            "first": ("fix", "Fix", [self.tool("2026-10-15T11:01:00Z", "Bash", {"description": "Fix"})]),
+            "retry": ("fix", "Fix", [self.tool("2026-10-15T11:21:00Z", "Bash", {"description": "Fix"})]),
+        })
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["status"], workflow["started"], workflow["ended"]),
+                         ("completed", "2026-10-15T11:00:01Z", "2026-10-15T11:40:00Z"))
+
     def test_a_workflow_without_its_launch_record_is_named_by_its_run_and_falls_silent(self):
         self.workflow("wf_two", [{"type": "started", "key": "k", "agentId": "quiet", "label": "survey", "phase": "Scan"}], {
             "quiet": ("survey", "Scan", [self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Scan"})]),
