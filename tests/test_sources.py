@@ -590,6 +590,15 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual((workflow["status"], workflow["ended"]), ("stopped", "2026-10-15T11:10:01Z"))
         self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("stopped", "2026-10-15T11:05:00Z")])
 
+    def test_a_journal_failure_finishes_its_agent_as_failed(self):
+        self.append(self.launch("2026-10-15T11:00:01Z", "wf_fail", "workflow-task", "fix-flow", "Fix the change"))
+        self.workflow("wf_fail", [{"type": "launched"}, {"type": "started", "key": "k", "agentId": "fixer", "label": "fix", "phase": "Fix"},
+                                  {"type": "failed", "key": "k", "agentId": "fixer"}], {
+            "fixer": ("fix", "Fix", [self.tool("2026-10-15T11:55:00Z", "Bash", {"description": "Fix"})]),
+        })
+        workflow, = self.state()["workflows"]
+        self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("failed", "2026-10-15T11:55:00Z")])
+
     def test_a_workflow_without_its_launch_record_is_named_by_its_run_and_falls_silent(self):
         self.workflow("wf_two", [{"type": "started", "key": "k", "agentId": "quiet", "label": "survey", "phase": "Scan"}], {
             "quiet": ("survey", "Scan", [self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Scan"})]),
