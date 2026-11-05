@@ -616,6 +616,13 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual((workflow["status"], workflow["started"], workflow["ended"]),
                          ("completed", "2026-10-15T11:00:01Z", "2026-10-15T11:40:00Z"))
 
+    def test_workflow_runs_are_ordered_by_start_not_by_their_random_identifier(self):
+        self.append(self.launch("2026-10-15T10:00:01Z", "wf_later_name", "earlier-task", "earlier", ""),
+                    self.launch("2026-10-15T11:00:01Z", "wf_early_name", "later-task", "later", ""))
+        for run_id in ("wf_later_name", "wf_early_name"):
+            self.workflow(run_id, [{"type": "launched"}], {})
+        self.assertEqual([workflow["name"] for workflow in self.state()["workflows"]], ["earlier", "later"])
+
     def test_a_workflow_without_its_launch_record_is_named_by_its_run_and_falls_silent(self):
         self.workflow("wf_two", [{"type": "started", "key": "k", "agentId": "quiet", "label": "survey", "phase": "Scan"}], {
             "quiet": ("survey", "Scan", [self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Scan"})]),

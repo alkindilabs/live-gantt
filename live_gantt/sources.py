@@ -1072,14 +1072,14 @@ class SourceStore:
         }
 
     def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> list[dict[str, Any]]:
-        """Return each workflow run with its agents in journal start order.
+        """Return each workflow run, earliest start first, with its agents in journal start order.
 
         A journal result line or the agent's own hand-back finishes an agent; a journal failure line fails it. The run's state is its background
         task's terminal notification; until then it runs while an agent runs and falls silent with its agents.
         An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed."""
         if session.transcript is None:
             return []
-        workflows: list[dict[str, Any]] = []
+        workflows: list[tuple[datetime | None, dict[str, Any]]] = []
         for run in _workflow_runs(_agents_directory(session.transcript)):
             launch = parent.workflows.get(run.name)
             notification = parent.notifications.get(launch.task_id) if launch else None
@@ -1111,9 +1111,11 @@ class SourceStore:
                 live = any(agent["status"] == "running" for agent in agents)
                 quiet = last is not None and now - last >= SILENT_AFTER
                 run_status = "running" if live or not quiet else "silent"
-            workflows.append({
+            started = launch.launched if launch else min(firsts, default=None)
+            workflows.append((started, {
                 "id": run.name, "name": name, "description": launch.summary if launch else "",
-                "status": run_status, "started": _iso(launch.launched if launch else min(firsts, default=None)),
+                "status": run_status, "started": _iso(started),
                 "ended": _iso(notified), "lastActivityAt": _iso(last), "activity": "", "agents": agents,
-            })
-        return workflows
+            }))
+        workflows.sort(key=lambda pair: (pair[0] is None, pair[0] or now))
+        return [workflow for _, workflow in workflows]
