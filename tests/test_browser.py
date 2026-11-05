@@ -36,6 +36,7 @@ async function main() {
   let nextTimer = 0;
   let firstDiscovery = true;
   let stateStatus = 503;
+  let serverVersion = "0.6.3";
   const target = scenario === "invalid" ? "invalid/session" : "codex-target-session";
   const encodedTarget = encodeURIComponent(target);
   const other = { id: "other-session", title: "Other session", chartable: true, provider: "claude" };
@@ -80,6 +81,7 @@ async function main() {
         }
         return { ok: true, json: async () => ({ lists: [other] }) };
       }
+      if (url === "/api/version") return { ok: true, json: async () => ({ version: serverVersion }) };
       return { status: stateStatus, ok: stateStatus === 200 };
     },
   };
@@ -113,6 +115,22 @@ async function main() {
     assert.equal(location.hash, `#session=${encodedTarget}`, "A temporary state failure must not replace the requested session");
     assert.equal(streams.at(-1).url, `/events?list=${encodedTarget}`);
   }
+  if (scenario === "version") {
+    const current = streams.at(-1);
+    current.onopen();
+    await settle();
+    const label = elements.get("version");
+    assert.equal(label.textContent, "v0.6.3");
+    assert.equal(label.hidden, false);
+    serverVersion = "0.6.4";
+    current.onopen();
+    await settle();
+    assert.equal(label.textContent, "v0.6.4", "A reconnect to an upgraded service must show its release");
+    serverVersion = null;
+    current.onopen();
+    await settle();
+    assert.equal(label.hidden, true, "A service without a readable release must hide the label");
+  }
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
@@ -137,3 +155,6 @@ class BrowserSessionTests(unittest.TestCase):
 
     def test_confirmed_invalid_session_uses_available_fallback(self):
         self.run_scenario("invalid")
+
+    def test_version_label_follows_the_connected_service(self):
+        self.run_scenario("version")
