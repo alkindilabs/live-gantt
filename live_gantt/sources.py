@@ -300,7 +300,8 @@ class _TaskHistory:
 
 @dataclass
 class _WorkflowLaunch:
-    """What the parent's Workflow tool result says about a run: its name, summary, background task and launch time."""
+    """What the parent's Workflow tool results say about a run: its name, summary and background task from its latest
+    launch, and its first launch time. A resume launches the same run again."""
 
     name: str
     summary: str
@@ -568,8 +569,9 @@ class _Transcript:
         if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in ("runId", "workflowName", "taskId")):
             return
         summary = result.get("summary")
+        previous = self.workflows.get(result["runId"])
         self.workflows[result["runId"]] = _WorkflowLaunch(result["workflowName"], summary if isinstance(summary, str) else "",
-                                                          result["taskId"], timestamp)
+                                                          result["taskId"], previous.launched if previous else timestamp)
 
     def _read_agent_alias(self, text: str) -> None:
         agent = AGENT_ID_PATTERN.search(text)
