@@ -74,7 +74,7 @@ Read-only routes expose lists, selected state, quota and the running release. Ev
 
 ## Browser and process lifecycle
 
-[The browser](live_gantt/static/app.js) keeps account usage independent of selection. A compact session/monitor header leaves a viewport-filling workspace. Timeline, work inspector and sidebar scroll independently. Narrow screens switch between sidebar and timeline. Sidebar disclosures expand in flow; monitor details anchor to its row. Server owns staleness, pace and milestone forecasts. Passed forecasts never imply reached limits; missing P50 differs from missing P90. “Planned tasks complete” covers only the plan; agent-only sessions have no invented progress.
+[The browser](live_gantt/static/app.js) keeps account usage independent of selection. A compact session/monitor header leaves a viewport-filling workspace. Timeline, work inspector and sidebar scroll independently. Narrow screens switch between sidebar and timeline. Sidebar disclosures expand in flow; monitor details anchor to its row. Server owns staleness, pace, milestone names (omitted is Main) and forecasts. Passed forecasts never imply reached limits; missing P50 differs from missing P90. “Planned tasks complete” covers only the plan; agent-only sessions have no invented progress.
 
 The picker lists recent chartable work and selection; search reaches older work. `#session=<id>` survives reloads and discovery failures through direct checks; partial listings cannot replace it. One stream serves session or quota views. Hiding closes it; resuming gets a full snapshot. Only confirmed removal clears selection.
 

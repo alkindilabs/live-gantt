@@ -6,6 +6,7 @@ from copy import deepcopy
 import unittest
 
 from live_gantt.schedule import project
+from live_gantt.sources import DEFAULT_MILESTONE
 
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
@@ -15,12 +16,12 @@ def timestamp(hours=0):
     return (NOW + timedelta(hours=hours)).isoformat()
 
 
-def task(task_id, hours=1, *, lane="Main", status="pending", **fields):
+def task(task_id, hours=1, *, lane=DEFAULT_MILESTONE, status="pending", **fields):
     estimate = None if hours is None else {"low": hours, "likely": hours, "high": hours}
     item = {
         "id": str(task_id), "subject": f"Task {task_id}", "description": "",
         "activeForm": "", "status": status, "blocks": [], "blockedBy": [],
-        "metadata": {}, "weight": 1.0, "milestone": "", "lane": lane,
+        "metadata": {}, "weight": 1.0, "milestone": DEFAULT_MILESTONE, "lane": lane,
         "progress": 0, "liveProgress": 0, "estimate": estimate,
         "created": None, "started": None, "ended": None, "history": [],
         "warnings": [], "agents": [], "runs": [],

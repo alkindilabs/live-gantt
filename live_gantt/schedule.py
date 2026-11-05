@@ -221,7 +221,7 @@ def _upper_forecast(task, mean_forecast, predecessors, variances, now, intervals
 def _milestones(tasks: list[dict], forecasts: dict[str, _Forecast], upper_forecasts: dict[str, _Forecast], warnings: list[str]) -> list[dict]:
     groups = defaultdict(list)
     for task in tasks:
-        groups[task["milestone"] or "Main"].append(task)
+        groups[task["milestone"]].append(task)
     milestones = []
     for name, members in groups.items():
         largest_weight = max(task["weight"] for task in members)

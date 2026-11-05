@@ -847,6 +847,13 @@ class SourceStoreTests(unittest.TestCase):
             self.assertTrue(listing["recent"])
             self.assertEqual(listing["title"], "At the cutoff")
 
+    def test_an_omitted_milestone_is_reported_as_main_and_names_the_default_lane(self):
+        self.task("1")
+        self.task("2", metadata={"milestone": "Release"})
+        tasks = {task["id"]: task for task in self.state()["tasks"]}
+        self.assertEqual((tasks["1"]["milestone"], tasks["1"]["lane"]), ("Main", "Main"))
+        self.assertEqual((tasks["2"]["milestone"], tasks["2"]["lane"]), ("Release", "Release"))
+
     def test_malformed_values_warn_and_state_remains_json_serializable(self):
         self.task(status=["completed"], metadata={
             "weight": 10 ** 400,
@@ -862,6 +869,7 @@ class SourceStoreTests(unittest.TestCase):
         task = state["tasks"][0]
         self.assertEqual(task["status"], "pending")
         self.assertEqual(task["weight"], 1)
+        self.assertEqual(task["milestone"], "Main")
         self.assertEqual(task["lane"], "Main")
         self.assertEqual(task["runs"], [])
         self.assertIsNone(task["metadata"]["future"]["value"])
