@@ -112,6 +112,12 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(result["state"], "attention")
         self.assertIn("15", " ".join(result["issues"]))
 
+    def test_a_stale_task_flagged_by_plan_freshness_is_reported_once(self):
+        message = "Task #1 is in progress but has not been updated for 16 minutes."
+        self.model["tasks"] = [task(minutes=16)]
+        self.model["freshness"] = {"stale": True, "findings": [{"rule": "stale-progress", "taskId": "1", "message": message}]}
+        self.assertEqual(self.read()["issues"], [message])
+
     def test_unknown_owner_and_exited_unfinished_work_never_show_working(self):
         self.model["liveness"]["status"] = "unknown"
         self.assertEqual(self.read()["state"], "unverified")

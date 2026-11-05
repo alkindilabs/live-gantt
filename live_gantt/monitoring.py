@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from .freshness import ACTIVE_SESSION_MINUTES, STALE_PROGRESS_MINUTES, SILENT_RUN_MINUTES, MISSING_SCHEDULE
+from .freshness import ACTIVE_SESSION_MINUTES, STALE_PROGRESS, STALE_PROGRESS_MINUTES, SILENT_RUN_MINUTES, MISSING_SCHEDULE
 from .sources import parse_time
 
 
@@ -82,12 +82,14 @@ def summarize(model, now, *, runtime=None, native=None):
     issues = []
     if phase in FAILURE_PHASES or phase == "unknown" and runtime.get("detail"):
         issues.append(runtime.get("detail") or "The last recorded turn did not finish successfully.")
-    for finding in model.get("freshness", {}).get("findings", []):
+    findings = model.get("freshness", {}).get("findings", [])
+    for finding in findings:
         if finding.get("rule") != MISSING_SCHEDULE and finding.get("message"):
             issues.append(finding["message"])
+    flagged_stale = {finding.get("taskId") for finding in findings if finding.get("rule") == STALE_PROGRESS}
     for task in tasks:
         updated = parse_time(task.get("updatedAt"))
-        if (task.get("status") == "in_progress" and updated is not None
+        if (task.get("status") == "in_progress" and task.get("id") not in flagged_stale and updated is not None
                 and now - updated >= timedelta(minutes=STALE_PROGRESS_MINUTES)):
             issues.append(f"Task {task.get('id', '?')} has no recorded plan update for {STALE_PROGRESS_MINUTES} minutes or more.")
     issues.extend(background_problems)
