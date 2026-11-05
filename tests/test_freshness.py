@@ -3,7 +3,8 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from live_gantt.freshness import ACTIVE_SESSION_MINUTES, SILENT_RUN_MINUTES, STALE_PROGRESS_MINUTES, assess
+from live_gantt.freshness import (ACTIVE_SESSION_MINUTES, FUTURE_RUN_TOLERANCE_MINUTES, SILENT_RUN_MINUTES,
+                                  STALE_PROGRESS_MINUTES, assess)
 
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
@@ -91,8 +92,8 @@ class ProgressRuleTests(unittest.TestCase):
         self.assertEqual(rules([task(status="pending")]), [])
 
 
-def run(*, log="job.log", log_updated=NOW, ended=None, pid=None, pid_alive=None):
-    return {"label": "job f", "started": iso(ago(60)), "ended": ended and iso(ended),
+def run(*, started=None, log="job.log", log_updated=NOW, ended=None, pid=None, pid_alive=None):
+    return {"label": "job f", "started": iso(started or ago(60)), "ended": ended and iso(ended),
             "log": log, "logUpdatedAt": log_updated and iso(log_updated),
             "pid": pid, "pidAlive": pid_alive, "status": "completed" if ended else "running"}
 
@@ -124,6 +125,18 @@ class SilentRunRuleTests(unittest.TestCase):
         self.assertEqual(finding["rule"], "silent-run")
         self.assertEqual(finding["message"], "Run 'job f' of task #1: log not found at job.log.")
         self.assertEqual(finding["observed"], "log not found")
+
+
+class FutureRunRuleTests(unittest.TestCase):
+    def test_a_run_time_beyond_the_tolerance_is_a_finding_even_when_idle_or_ended(self):
+        tolerance = timedelta(minutes=FUTURE_RUN_TOLERANCE_MINUTES)
+        finding, = run_findings(started=NOW + tolerance + ONE_SECOND, transcript_updated=None)
+        self.assertEqual((finding["rule"], finding["taskId"], finding["observed"]), ("future-run", "1", "5 min ahead"))
+        self.assertEqual(finding["message"],
+                         "Run 'job f' of task #1 records a time 5 minutes in the future; record the observed start and end.")
+        self.assertEqual(run_findings(started=NOW + tolerance), [])
+        ended_ahead, = run_findings(ended=NOW + 3 * tolerance, transcript_updated=None)
+        self.assertEqual((ended_ahead["rule"], ended_ahead["observed"]), ("future-run", "15 min ahead"))
 
 
 class ProcessGoneRuleTests(unittest.TestCase):
