@@ -126,6 +126,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(providers["codex"]["windows"][0]["windowMinutes"], 10080)
         self.assertEqual(providers["claude"]["status"], "unavailable")
 
+    def test_version_route_reports_the_running_package_release(self):
+        connection = self.connection()
+        connection.request("GET", "/api/version")
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        manifest = json.loads((Path(__file__).resolve().parents[1] / ".claude-plugin" / "plugin.json").read_text())
+        self.assertEqual(json.load(response), {"version": manifest["version"]})
+
     def test_usage_only_stream_has_no_fake_session_and_stops_polling_on_disconnect(self):
         next_event = self.open_stream("/events/usage")
         events = {}

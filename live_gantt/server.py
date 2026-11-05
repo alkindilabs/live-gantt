@@ -22,6 +22,7 @@ from .providers import CODEX_PREFIX, ProviderStore
 from .liveness import unknown_liveness
 from .monitoring import summarize
 from .endpoint import DEFAULT_PORT, LOOPBACK
+from .installation import release_version
 
 
 POLL_SECONDS = 2.0
@@ -29,6 +30,7 @@ BACKGROUND_SESSION_SECONDS = 600.0
 HEARTBEAT_SECONDS = 15.0
 SOCKET_TIMEOUT_SECONDS = 20.0
 STATIC = Path(__file__).with_name("static")
+RELEASE_ROOT = Path(__file__).resolve().parents[1]
 STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                 "/style.css": ("style.css", "text/css; charset=utf-8"),
                 "/app.js": ("app.js", "text/javascript; charset=utf-8")}
@@ -276,13 +278,14 @@ class Monitor:
 
 
 class LocalServer(ThreadingHTTPServer):
-    """An IPv4 loopback server owning one shared source monitor."""
+    """An IPv4 loopback server owning one shared source monitor and reporting the release it runs."""
 
     daemon_threads = True
 
     def __init__(self, root, port, poll_seconds, heartbeat_seconds, *, codex_root=None, usage_root=None):
         self.monitor = Monitor(ProviderStore(root, codex_root=codex_root, usage_root=usage_root),
                                poll_seconds, heartbeat_seconds)
+        self.version = release_version(RELEASE_ROOT)
         super().__init__((LOOPBACK, port), Handler)
 
     def server_bind(self):
@@ -363,6 +366,9 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8", head)
         elif url.path == "/api/usage":
             self._send(encode_json(self.server.monitor.usage()),
+                       "application/json; charset=utf-8", head)
+        elif url.path == "/api/version":
+            self._send(encode_json({"version": self.server.version}),
                        "application/json; charset=utf-8", head)
         elif url.path == "/events/usage":
             self.server.monitor.lists()
