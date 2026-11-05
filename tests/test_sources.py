@@ -574,6 +574,22 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [
             ("completed", "2026-10-15T11:01:00Z"), ("killed", "2026-10-15T11:55:00Z"), ("completed", "2026-10-15T11:20:01Z")])
 
+    def test_a_workflow_the_session_stops_ends_at_the_confirmed_stop(self):
+        self.append(self.launch("2026-10-15T11:00:01Z", "wf_stop", "workflow-task", "apply-flow", "Apply the change"))
+        self.workflow("wf_stop", [{"type": "launched"}, {"type": "started", "key": "k", "agentId": "applier", "label": "apply", "phase": "Apply"}], {
+            "applier": ("apply", "Apply", [self.tool("2026-10-15T11:05:00Z", "Bash", {"description": "Apply"})]),
+        })
+        refused = self.result("2026-10-15T11:09:01Z", "Task workflow-task is not running", "refused-stop")
+        refused["message"]["content"][0]["is_error"] = True
+        self.append(self.tool("2026-10-15T11:09:00Z", "TaskStop", {"task_id": "workflow-task"}, "refused-stop"), refused)
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["status"], workflow["ended"]), ("silent", None))
+        self.append(self.tool("2026-10-15T11:10:00Z", "TaskStop", {"task_id": "workflow-task"}, "stop"),
+                    self.result("2026-10-15T11:10:01Z", "Successfully stopped task: workflow-task", "stop"))
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["status"], workflow["ended"]), ("stopped", "2026-10-15T11:10:01Z"))
+        self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("stopped", "2026-10-15T11:05:00Z")])
+
     def test_a_workflow_without_its_launch_record_is_named_by_its_run_and_falls_silent(self):
         self.workflow("wf_two", [{"type": "started", "key": "k", "agentId": "quiet", "label": "survey", "phase": "Scan"}], {
             "quiet": ("survey", "Scan", [self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Scan"})]),
