@@ -66,7 +66,7 @@ function savedExpanded() {
 }
 
 const elements = Object.fromEntries(
-  ["overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["version", "overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
@@ -402,6 +402,17 @@ function readLocal(url) {
   return fetch(url, { cache: "no-store", signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
 }
 
+async function renderVersion() {
+  try {
+    const response = await readLocal("/api/version");
+    if (!response.ok) return;
+    const { version } = await response.json();
+    const known = typeof version === "string" && version !== "";
+    elements.version.textContent = known ? `v${version}` : "";
+    elements.version.hidden = !known;
+  } catch {}
+}
+
 function recoverStream() {
   closeStream();
   renderConnection();
@@ -589,7 +600,9 @@ function connectStream() {
     if (!next) setNotice("This session is no longer available. Waiting for local activity; use All sessions to open another.");
   });
   stream.onopen = () => {
-    if (state.stream === stream) markReceived();
+    if (state.stream !== stream) return;
+    markReceived();
+    renderVersion();
   };
   stream.onerror = () => {
     if (state.stream !== stream) return;
