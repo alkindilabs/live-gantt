@@ -149,6 +149,13 @@ class MonitoringTests(unittest.TestCase):
                 self.assertEqual(self.read()["state"], "attention")
                 self.model[field] = []
 
+    def test_failures_the_session_already_resolved_do_not_need_attention(self):
+        self.model["agents"] = [{"status": "stopped", "agentType": "subagent", "resolved": True}]
+        self.model["workflows"] = [{"status": "stopped", "resolved": True, "agents": [{"status": "failed", "resolved": True}]}]
+        self.assertEqual(self.read()["state"], "working")
+        self.model["workflows"][0]["agents"].append({"status": "failed", "resolved": False})
+        self.assertEqual(self.read()["state"], "attention")
+
     def test_exited_harness_does_not_hide_failed_background_work(self):
         self.runtime["phase"] = "idle"
         self.model["liveness"]["status"] = "exited"

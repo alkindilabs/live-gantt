@@ -31,9 +31,9 @@ def _background(model, now):
     pending_workflows = [flow for flow in model.get("workflows", []) if flow.get("status") in CHILD_ACTIVE_STATUSES]
     times = [parse_time(agent.get("lastActivityAt")) for agent in pending_agents]
     problems = []
-    if any(agent.get("status") in FAILED_WORK_STATUSES for agent in agents):
+    if any(agent.get("status") in FAILED_WORK_STATUSES and not agent.get("resolved") for agent in agents):
         problems.append("A recorded agent failed or stopped before completion.")
-    if any(flow.get("status") in FAILED_WORK_STATUSES for flow in model.get("workflows", [])):
+    if any(flow.get("status") in FAILED_WORK_STATUSES and not flow.get("resolved") for flow in model.get("workflows", [])):
         problems.append("A recorded workflow failed or stopped before completion.")
     for run in pending_runs:
         logged = parse_time(run.get("logUpdatedAt"))
