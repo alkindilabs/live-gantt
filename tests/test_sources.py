@@ -642,6 +642,29 @@ class SourceStoreTests(unittest.TestCase):
                          ("completed", "2026-10-15T11:00:01Z", "2026-10-15T11:59:30Z", False))
         self.assertEqual(sorted((agent["status"], agent["ended"], agent["resolved"]) for agent in workflow["agents"]), sorted(attempts))
 
+    def test_a_later_agent_of_the_same_workflow_and_label_resolves_an_earlier_failure(self):
+        self.append(self.launch("2026-10-15T10:00:01Z", "wf_first", "first-task", "lane-flow", ""),
+                    {"type": "user", "timestamp": "2026-10-15T10:31:00Z", "message": {"content": self.notification("first-task")}},
+                    self.launch("2026-10-15T11:00:01Z", "wf_second", "second-task", "lane-flow", ""),
+                    self.launch("2026-10-15T11:00:02Z", "wf_other", "other-task", "other-flow", ""))
+        self.workflow("wf_first", [{"type": "launched"},
+                                   {"type": "started", "key": "a", "agentId": "impl", "label": "impl S3", "phase": "Implement"},
+                                   {"type": "failed", "key": "a", "agentId": "impl"},
+                                   {"type": "started", "key": "b", "agentId": "review", "label": "review S3", "phase": "Review"},
+                                   {"type": "failed", "key": "b", "agentId": "review"}], {
+            "impl": ("impl S3", "Implement", [self.tool("2026-10-15T10:30:00Z", "Bash", {"description": "Build"})]),
+            "review": ("review S3", "Review", [self.tool("2026-10-15T10:30:30Z", "Bash", {"description": "Review"})]),
+        })
+        self.workflow("wf_second", [{"type": "launched"}, {"type": "started", "key": "c", "agentId": "retry", "label": "impl S3", "phase": "Implement"}], {
+            "retry": ("impl S3", "Implement", [self.tool("2026-10-15T11:55:00Z", "Bash", {"description": "Build"})]),
+        })
+        self.workflow("wf_other", [{"type": "launched"}, {"type": "started", "key": "d", "agentId": "elsewhere", "label": "review S3", "phase": "Review"}], {
+            "elsewhere": ("review S3", "Review", [self.tool("2026-10-15T11:56:00Z", "Bash", {"description": "Review"})]),
+        })
+        agents = {agent["id"]: agent for workflow in self.state()["workflows"] for agent in workflow["agents"]}
+        self.assertEqual({agent_id: (agents[agent_id]["status"], agents[agent_id]["resolved"]) for agent_id in ("impl", "review", "retry")},
+                         {"impl": ("failed", True), "review": ("failed", False), "retry": ("running", False)})
+
     def test_workflow_runs_are_ordered_by_start_not_by_their_random_identifier(self):
         self.append(self.launch("2026-10-15T10:00:01Z", "wf_later_name", "earlier-task", "earlier", ""),
                     self.launch("2026-10-15T11:00:01Z", "wf_early_name", "later-task", "later", ""))
