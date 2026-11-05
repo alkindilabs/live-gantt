@@ -68,7 +68,7 @@ Snapshots use the source-read clock. Disconnects or forty seconds without monito
 
 [server.py](live_gantt/server.py) binds exclusively to `127.0.0.1` without hostname resolution and requires exactly one Host header matching that address or `localhost` with the bound port before dispatching any method. Fixed routes prevent traversal. Responses omit cross-origin resource sharing headers and include a same-origin content security policy. JSON serialization rejects non-finite numbers; browser source text enters text nodes.
 
-Read-only routes expose lists, selected state and quota. Event streams send initial and changed snapshots plus heartbeats; confirmed removal emits `missing`. [README interfaces](README.md#interfaces-and-verification) defines routes and fields.
+Read-only routes expose lists, selected state, quota and the running release. Event streams send initial and changed snapshots plus heartbeats; confirmed removal emits `missing`. [README interfaces](README.md#interfaces-and-verification) defines routes and fields.
 
 `Monitor` serializes reads every two seconds for open streams and the last opened session, even with hidden tabs, until `BACKGROUND_SESSION_SECONDS` pass without a read of it; the worker then stops. Discovery errors retain listings. Failed reads preserve the model and report `sync.status: retrying`; `sync.checkedAt` advances only on successful reads, including unchanged data. Heartbeats separate source health from connection liveness. Initial failures return 503; confirmed missing sessions return 404. Reconnects receive full snapshots. Quota changes invalidate projections; unconstrained browser dates advance while reset anchors stay fixed.
 
