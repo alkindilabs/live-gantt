@@ -1278,7 +1278,7 @@ function renderMilestones(now) {
       done.push(milestone.name);
       continue;
     }
-    const name = milestone.name || "Ungrouped";
+    const name = milestone.name;
     const card = node("article", "milestone");
     const heading = node("div", "milestone-heading");
     heading.append(node("h3", "", name));

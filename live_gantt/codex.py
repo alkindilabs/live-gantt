@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .freshness import session_active
-from .sources import (LIST_ID, RECENT_SESSION_WINDOW, SILENT_AFTER, TASK_STATUSES, UTC,
+from .sources import (DEFAULT_MILESTONE, LIST_ID, RECENT_SESSION_WINDOW, SILENT_AFTER, TASK_STATUSES, UTC,
                       _finite, _iso, _prompt_title, _regular_stat, append_checkpoint, parse_time)
 from .usage import PERCENT_LIMIT, empty_token_usage
 
@@ -190,7 +190,7 @@ class _Transcript:
             if task is None:
                 task = {"id": identifier, "subject": text, "description": "", "activeForm": "",
                         "status": "pending", "blocks": [], "blockedBy": [],
-                        "metadata": {"lane": NATIVE_PLAN_LANE}, "weight": 1, "milestone": "",
+                        "metadata": {"lane": NATIVE_PLAN_LANE}, "weight": 1, "milestone": DEFAULT_MILESTONE,
                         "lane": NATIVE_PLAN_LANE, "progress": 0, "liveProgress": 0, "estimate": None,
                         "created": _iso(timestamp), "started": None, "ended": None, "history": [],
                         "warnings": [], "readable": True, "updatedAt": _iso(timestamp),

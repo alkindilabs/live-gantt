@@ -16,11 +16,11 @@ Agents write these fields through Claude Code's task metadata. Live Gantt never 
 | Field | Contract |
 | --- | --- |
 | `weight` | Set relative effort when tasks have unequal scope. Positive finite value; default `1`. |
-| `milestone` | Set the delivery group when creating the plan; an omitted name is displayed as Main. |
+| `milestone` | Set the delivery group when creating the plan; an omitted name is reported as Main. |
 | `progress` | Update as work advances. Finite number from `0` to `100`; default `0`. Used for milestone completion while in progress. |
 | `live` | Set when a batch journal can measure progress. Object with `journal`, positive integer `planned`, and numeric `from` and `to` satisfying `0 <= from <= to <= 100`. The journal is read incrementally. Lines containing a `type` of `result` count as finished agents. Live share is `from + (to - from) * min(finished / planned, 1)`. |
 | `estimate` | Set before starting or queueing every schedulable task; revise when scope changes. Object with finite elapsed hours `low`, `likely`, `high`, satisfying `0 <= low <= likely <= high`. No default estimate is invented. |
-| `lane` | Set the serial work stream when creating every schedulable task; distinct lanes can run in parallel. Row group; defaults to the milestone, otherwise Main. |
+| `lane` | Set the serial work stream when creating every schedulable task; distinct lanes can run in parallel. Row group; defaults to the milestone. |
 | `provider` | Optional `claude`, `codex` or `external`; omitted values inherit the session provider. A task with only external `runs` and no `agents` defaults to `external`. Set this to the provider actually doing the work; it controls which shared-account quota can delay its forecast. |
 | `agents` | Update after starting background agents that belong to this task. List of subagent identifiers, without the `agent-` filename prefix or file suffix; workflow agents' identifiers work too. Matching agents become thin bars under the task. Unassigned agents remain in the Agents lane, and unassigned workflow agents under their workflow run. |
 | `runs` | Update when an external process starts or ends. List of objects with a text `label`, International Organization for Standardization (ISO) 8601 `started`, `ended` timestamp or `null`, `log` path or `null`, and an optional positive integer `pid` of the process. The end cannot precede the start. A null end means live; the log modification time provides the last activity. |

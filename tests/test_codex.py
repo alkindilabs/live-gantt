@@ -53,7 +53,7 @@ class CodexSourceTests(unittest.TestCase):
         self.assertEqual({key: task["status"] for key, task in first.items()},
                          {"Inspect": "completed", "Implement": "in_progress"})
         self.assertTrue(all(task["estimate"] is None and not task["blockedBy"] for task in first.values()))
-        self.assertTrue(all(task["lane"] == "Native plan" for task in first.values()))
+        self.assertTrue(all(task["lane"] == "Native plan" and task["milestone"] == "Main" for task in first.values()))
         self.append(path, self.plan([("Implement", "completed"), ("Inspect", "completed"),
                                      ("Verify", "in_progress")], "2026-10-18T11:59:20Z"))
         second = {task["subject"]: task for task in self.store.state("plan", self.now)["tasks"]}

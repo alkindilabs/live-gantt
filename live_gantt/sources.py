@@ -28,6 +28,7 @@ IDENTITY_TAIL_BYTES = 256 * 1024
 APPEND_CHECK_BYTES = 256
 PROMPT_TITLE_CHARACTERS = 120
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
+DEFAULT_MILESTONE = "Main"
 LIVE_AGENT_STATUSES = frozenset({"running", "in_progress", "pending"})
 TIMESTAMP_PATTERN = re.compile(rb'"timestamp"\s*:\s*"([^"\\]+)"')
 CREATION_PATTERN = re.compile(r"^Task #(\S+) created successfully(?:\b|:)")
@@ -912,15 +913,15 @@ class SourceStore:
         if not _finite(progress) or not 0 <= progress <= 100:
             warnings.append("progress must be between 0 and 100")
             progress = 0
-        milestone = self._text(metadata, "milestone", "", warnings)
-        lane = self._text(metadata, "lane", milestone or "Main", warnings)
+        milestone = self._text(metadata, "milestone", "", warnings) or DEFAULT_MILESTONE
+        lane = self._text(metadata, "lane", milestone, warnings) or milestone
         history = transcript.histories.get(task_id, _TaskHistory())
         return {
             "id": task_id, "subject": self._text(document, "subject", task_id, warnings),
             "description": self._text(document, "description", "", warnings),
             "activeForm": self._text(document, "activeForm", "", warnings), "status": status,
             "blocks": self._ids(document, "blocks", warnings), "blockedBy": self._ids(document, "blockedBy", warnings),
-            "metadata": metadata, "weight": weight, "milestone": milestone, "lane": lane or milestone or "Main",
+            "metadata": metadata, "weight": weight, "milestone": milestone, "lane": lane,
             "progress": progress, "liveProgress": self._live(metadata, path.parent, warnings),
             "estimate": self._estimate(metadata, warnings), "created": _iso(history.created),
             "started": _iso(history.started), "ended": _iso(history.ended),
