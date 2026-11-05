@@ -17,6 +17,7 @@ from .python_support import MINIMUM_PYTHON, supported
 
 APPLICATION_DIRECTORY = "live-gantt"
 PACKAGE_DIRECTORY = "live_gantt"
+MANIFEST_PATH = Path(".claude-plugin/plugin.json")
 VERSION_FILENAME = "version"
 INSTALLATION_SETTINGS_FILENAME = "installation.json"
 SOURCE_ROOT_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -104,6 +105,18 @@ def systemd_configuration(plugin_root, directory, python, settings):
     for placeholder, value in replacements.items():
         unit = unit.replace(placeholder, value)
     return unit
+
+
+def release_version(root):
+    """Return the release version the plugin manifest under `root` names, or None when it is missing or malformed.
+
+    A plugin checkout and an installed copy share this layout, so the running service reads its own release."""
+    try:
+        manifest = json.loads((root / MANIFEST_PATH).read_text())
+    except (OSError, UnicodeError, ValueError):
+        return None
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    return version if isinstance(version, str) and version else None
 
 
 def _read_settings(directory):
@@ -195,8 +208,9 @@ def install(plugin_root):
     system = platform.system()
     home = Path.home()
     directory = installation_directory(system, home, os.environ)
-    manifest = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
-    version = manifest["version"]
+    version = release_version(plugin_root)
+    if version is None:
+        raise ValueError("The plugin manifest names no release version")
     settings = installation_settings(os.environ, _read_settings(directory))
     identifier, target = _service_target(system, home, os.environ)
     python = service_python(shutil.which, sys.executable)
@@ -209,11 +223,15 @@ def install(plugin_root):
             plugin_root / PACKAGE_DIRECTORY, staged_package,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        staged_manifest = Path(staging) / MANIFEST_PATH
+        staged_manifest.parent.mkdir()
+        shutil.copyfile(plugin_root / MANIFEST_PATH, staged_manifest)
         _stop_service(system, identifier)
-        current_package = directory / PACKAGE_DIRECTORY
-        if current_package.exists():
-            current_package.rename(Path(staging) / "previous-package")
-        staged_package.rename(current_package)
+        for staged, previous in ((staged_package, "previous-package"), (staged_manifest.parent, "previous-manifest")):
+            current = directory / staged.name
+            if current.exists():
+                current.rename(Path(staging) / previous)
+            staged.rename(current)
         target.parent.mkdir(parents=True, exist_ok=True)
         if system == "Darwin":
             log = home / "Library" / "Logs" / f"{APPLICATION_DIRECTORY}.log"
@@ -251,9 +269,9 @@ def uninstall(plugin_root):
     target.unlink(missing_ok=True)
     if system == "Linux":
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    package = directory / PACKAGE_DIRECTORY
-    if package.exists():
-        shutil.rmtree(package)
+    for copied in (directory / PACKAGE_DIRECTORY, directory / MANIFEST_PATH.parent):
+        if copied.exists():
+            shutil.rmtree(copied)
     for name in (VERSION_FILENAME, INSTALLATION_SETTINGS_FILENAME):
         (directory / name).unlink(missing_ok=True)
     codex_launcher = home / CODEX_LAUNCHER_PATH
