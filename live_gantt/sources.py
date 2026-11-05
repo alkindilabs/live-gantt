@@ -1092,10 +1092,12 @@ class SourceStore:
         task's terminal notification; until then it runs while an agent runs and falls silent with its agents.
         An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed.
         An unfinished agent of an attempt a resume superseded is `stopped`. Unfinished work of a superseded attempt or
-        of a run the session stopped is resolved: the session already acted on it."""
+        of a run the session stopped is resolved: the session already acted on it. So is an unfinished agent once a
+        later agent of the same workflow name and journal label starts after it ended: the session retried that step."""
         if session.transcript is None:
             return []
         workflows: list[tuple[datetime | None, dict[str, Any]]] = []
+        steps: list[tuple[tuple[str, str], datetime | None, datetime | None, dict[str, Any]]] = []
         for run in _workflow_runs(_agents_directory(session.transcript)):
             launch = parent.workflows.get(run.name)
             notification = parent.notifications.get(launch.task_id) if launch else None
@@ -1128,6 +1130,8 @@ class SourceStore:
                 label, phase = journal.started.get(agent_id, ("", ""))
                 agent.update(description=label or agent["description"], phase=phase, workflow=name)
                 agents.append(agent)
+                if label:
+                    steps.append(((name, label), transcript.first, ended, agent))
             last = max(lasts, default=None)
             if not run_ended:
                 live = any(agent["status"] == "running" for agent in agents)
@@ -1139,5 +1143,12 @@ class SourceStore:
                 "status": run_status, "resolved": run_stopped_here, "started": _iso(started),
                 "ended": _iso(notified), "lastActivityAt": _iso(last), "activity": "", "agents": agents,
             }))
+        retried_at: dict[tuple[str, str], list[datetime]] = {}
+        for step, started, _, _ in steps:
+            if started is not None:
+                retried_at.setdefault(step, []).append(started)
+        for step, _, ended, agent in steps:
+            if agent["status"] != "completed" and ended is not None and not agent["resolved"]:
+                agent["resolved"] = any(started > ended for started in retried_at.get(step, []))
         workflows.sort(key=lambda pair: (pair[0] is None, pair[0] or now))
         return [workflow for _, workflow in workflows]
