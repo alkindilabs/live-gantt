@@ -534,8 +534,8 @@ class SourceStoreTests(unittest.TestCase):
             self.agent(agent_id, *records, directory=run_dir,
                        meta={"agentType": "workflow-subagent", "description": label, "workflowPhase": phase})
 
-    def launch(self, timestamp, run_id, task_id, name, summary):
-        launched = self.result(timestamp, f"Workflow launched in background. Task ID: {task_id}", "launch")
+    def launch(self, timestamp, run_id, task_id, name, summary, tool_id="launch"):
+        launched = self.result(timestamp, f"Workflow launched in background. Task ID: {task_id}", tool_id)
         launched["toolUseResult"] = {"status": "async_launched", "taskId": task_id, "taskType": "local_workflow",
                                      "workflowName": name, "runId": run_id, "summary": summary}
         return launched
@@ -587,34 +587,60 @@ class SourceStoreTests(unittest.TestCase):
         self.append(self.tool("2026-10-15T11:10:00Z", "TaskStop", {"task_id": "workflow-task"}, "stop"),
                     self.result("2026-10-15T11:10:01Z", "Successfully stopped task: workflow-task", "stop"))
         workflow, = self.state()["workflows"]
-        self.assertEqual((workflow["status"], workflow["ended"]), ("stopped", "2026-10-15T11:10:01Z"))
-        self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("stopped", "2026-10-15T11:05:00Z")])
+        self.assertEqual((workflow["status"], workflow["ended"], workflow["resolved"]), ("stopped", "2026-10-15T11:10:01Z", True))
+        self.assertEqual([(agent["status"], agent["ended"], agent["resolved"]) for agent in workflow["agents"]],
+                         [("stopped", "2026-10-15T11:05:00Z", True)])
+
+    def test_only_the_sessions_own_stop_resolves_a_stopped_background_agent(self):
+        for agent_id in ("stopped-here", "stopped-elsewhere"):
+            self.agent(agent_id, self.tool("2026-10-15T11:00:00Z", "Bash", {"description": "Work"}))
+        self.append(self.tool("2026-10-15T11:10:00Z", "TaskStop", {"task_id": "stopped-here"}, "stop"),
+                    self.result("2026-10-15T11:10:01Z", "Successfully stopped task: stopped-here", "stop"),
+                    {"type": "user", "timestamp": "2026-10-15T11:11:00Z", "message": {"content": self.notification("stopped-elsewhere", "stopped")}})
+        agents = self.agents_by_id()
+        self.assertEqual([(agents[agent_id]["status"], agents[agent_id]["resolved"]) for agent_id in ("stopped-here", "stopped-elsewhere")],
+                         [("stopped", True), ("stopped", False)])
 
     def test_a_journal_failure_finishes_its_agent_as_failed(self):
         self.append(self.launch("2026-10-15T11:00:01Z", "wf_fail", "workflow-task", "fix-flow", "Fix the change"))
         self.workflow("wf_fail", [{"type": "launched"}, {"type": "started", "key": "k", "agentId": "fixer", "label": "fix", "phase": "Fix"},
                                   {"type": "failed", "key": "k", "agentId": "fixer"}], {
-            "fixer": ("fix", "Fix", [self.tool("2026-10-15T11:55:00Z", "Bash", {"description": "Fix"})]),
+            "fixer": ("fix", "Fix", [self.tool("2026-10-15T11:00:00.900Z", "Bash", {"description": "Start"}),
+                                     self.tool("2026-10-15T11:55:00Z", "Bash", {"description": "Fix"})]),
         })
         workflow, = self.state()["workflows"]
-        self.assertEqual([(agent["status"], agent["ended"]) for agent in workflow["agents"]], [("failed", "2026-10-15T11:55:00Z")])
+        self.assertEqual([(agent["status"], agent["ended"], agent["resolved"]) for agent in workflow["agents"]],
+                         [("failed", "2026-10-15T11:55:00Z", False)])
+        self.assertIs(workflow["resolved"], False)
 
-    def test_a_resumed_workflow_starts_at_its_first_launch_and_ends_with_its_last(self):
+    def test_a_resumed_workflow_starts_at_its_first_launch_and_resolves_its_earlier_attempt(self):
         self.append(self.launch("2026-10-15T11:00:01Z", "wf_resumed", "first-task", "lane-flow", "Run the lane"),
                     self.tool("2026-10-15T11:10:00Z", "TaskStop", {"task_id": "first-task"}, "stop"),
                     self.result("2026-10-15T11:10:01Z", "Successfully stopped task: first-task", "stop"),
-                    self.launch("2026-10-15T11:20:01Z", "wf_resumed", "second-task", "lane-flow", "Run the lane"),
-                    {"type": "user", "timestamp": "2026-10-15T11:40:00Z", "message": {"content": self.notification("second-task")}})
+                    self.tool("2026-10-15T11:20:00Z", "Workflow", {"resumeFromRunId": "wf_resumed"}, "resume"),
+                    self.launch("2026-10-15T11:20:01Z", "wf_resumed", "second-task", "lane-flow", "Run the lane", "resume"))
         self.workflow("wf_resumed", [{"type": "launched"}, {"type": "started", "key": "k", "agentId": "first", "label": "fix", "phase": "Fix"},
-                                     {"type": "failed", "key": "k", "agentId": "first"}, {"type": "launched"},
+                                     {"type": "started", "key": "c", "agentId": "cut", "label": "check", "phase": "Fix"},
+                                     {"type": "failed", "key": "k", "agentId": "first"},
+                                     {"type": "started", "key": "e", "agentId": "early", "label": "survey", "phase": "Fix"},
+                                     {"type": "failed", "key": "e", "agentId": "early"},
                                      {"type": "started", "key": "k", "agentId": "retry", "label": "fix", "phase": "Fix"},
                                      {"type": "result", "key": "k", "agentId": "retry", "result": {}}], {
             "first": ("fix", "Fix", [self.tool("2026-10-15T11:01:00Z", "Bash", {"description": "Fix"})]),
-            "retry": ("fix", "Fix", [self.tool("2026-10-15T11:21:00Z", "Bash", {"description": "Fix"})]),
+            "cut": ("check", "Fix", [self.tool("2026-10-15T11:05:00Z", "Bash", {"description": "Check"})]),
+            "early": ("survey", "Fix", [self.tool("2026-10-15T11:20:00.500Z", "Bash", {"description": "Survey"})]),
+            "retry": ("fix", "Fix", [self.tool("2026-10-15T11:59:00Z", "Bash", {"description": "Fix"})]),
         })
+        attempts = [("stopped", "2026-10-15T11:05:00Z", True), ("failed", "2026-10-15T11:01:00Z", True),
+                    ("failed", "2026-10-15T11:20:00.500000Z", False), ("completed", "2026-10-15T11:59:00Z", False)]
         workflow, = self.state()["workflows"]
-        self.assertEqual((workflow["status"], workflow["started"], workflow["ended"]),
-                         ("completed", "2026-10-15T11:00:01Z", "2026-10-15T11:40:00Z"))
+        self.assertEqual(workflow["status"], "running")
+        self.assertEqual(sorted((agent["status"], agent["ended"], agent["resolved"]) for agent in workflow["agents"]), sorted(attempts))
+        self.append({"type": "user", "timestamp": "2026-10-15T11:59:30Z", "message": {"content": self.notification("second-task")}})
+        workflow, = self.state()["workflows"]
+        self.assertEqual((workflow["status"], workflow["started"], workflow["ended"], workflow["resolved"]),
+                         ("completed", "2026-10-15T11:00:01Z", "2026-10-15T11:59:30Z", False))
+        self.assertEqual(sorted((agent["status"], agent["ended"], agent["resolved"]) for agent in workflow["agents"]), sorted(attempts))
 
     def test_workflow_runs_are_ordered_by_start_not_by_their_random_identifier(self):
         self.append(self.launch("2026-10-15T10:00:01Z", "wf_later_name", "earlier-task", "earlier", ""),
