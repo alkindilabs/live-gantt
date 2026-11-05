@@ -301,12 +301,14 @@ class _TaskHistory:
 @dataclass
 class _WorkflowLaunch:
     """What the parent's Workflow tool results say about a run: its name, summary and background task from its latest
-    launch, and its first launch time. A resume launches the same run again."""
+    launch, and its first launch time. A resume launches the same run again; `resumed` is when the session called
+    Workflow for the latest attempt, so agents starting earlier belong to an attempt the resume superseded."""
 
     name: str
     summary: str
     task_id: str
     launched: datetime
+    resumed: datetime | None = None
 
 
 @dataclass
@@ -333,6 +335,8 @@ class _Transcript:
     response_usage: dict[str, dict[str, int]] = field(default_factory=dict)
     task_updates: dict[str, tuple[str, list[dict[str, Any]]]] = field(default_factory=dict)
     stop_requests: dict[str, str] = field(default_factory=dict)
+    stopped_tasks: set[str] = field(default_factory=set)
+    workflow_calls: dict[str, datetime] = field(default_factory=dict)
 
     def _consume(self, line: bytes) -> None:
         timestamp_match = TIMESTAMP_PATTERN.search(line)
@@ -354,9 +358,9 @@ class _Transcript:
             return
         if record.get("toolEndsTurn") is True:
             self.handed_back = timestamp
-        self._read_workflow_launch(record.get("toolUseResult"), timestamp)
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
+        self._read_workflow_launch(record.get("toolUseResult"), timestamp, content)
         for text in _texts(content) + _queued_texts(record):
             self._read_notifications(text, timestamp)
         if not isinstance(content, list):
@@ -374,6 +378,8 @@ class _Transcript:
                     self._read_task_update(inputs, timestamp, item.get("id"))
                 elif name == "TaskStop":
                     self._read_stop_request(inputs, item.get("id"))
+                elif name == "Workflow" and isinstance(item.get("id"), str):
+                    self.workflow_calls[item["id"]] = timestamp
             elif item.get("type") == "tool_result":
                 self._finish_task_update(item)
                 self._finish_stop(item, timestamp)
@@ -557,6 +563,7 @@ class _Transcript:
         task_id = self.stop_requests.pop(result.get("tool_use_id"), None)
         if task_id is not None and result.get("is_error") is not True:
             self.notifications[task_id] = ("stopped", timestamp)
+            self.stopped_tasks.add(task_id)
 
     def _read_notifications(self, text: str, timestamp: datetime) -> None:
         for notification in NOTIFICATION_PATTERN.findall(text):
@@ -564,14 +571,19 @@ class _Transcript:
             status = re.search(r"<status>([^<]+)</status>", notification)
             if task_id and status:
                 self.notifications[task_id.group(1).strip()] = (status.group(1).strip(), timestamp)
+                self.stopped_tasks.discard(task_id.group(1).strip())
 
-    def _read_workflow_launch(self, result: Any, timestamp: datetime) -> None:
+    def _read_workflow_launch(self, result: Any, timestamp: datetime, content: Any) -> None:
         if not isinstance(result, dict) or not all(isinstance(result.get(key), str) for key in ("runId", "workflowName", "taskId")):
             return
+        call_ids = [item.get("tool_use_id") for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+        called = next((self.workflow_calls.pop(call_id) for call_id in call_ids
+                       if isinstance(call_id, str) and call_id in self.workflow_calls), timestamp)
         summary = result.get("summary")
         previous = self.workflows.get(result["runId"])
         self.workflows[result["runId"]] = _WorkflowLaunch(result["workflowName"], summary if isinstance(summary, str) else "",
-                                                          result["taskId"], previous.launched if previous else timestamp)
+                                                          result["taskId"], previous.launched if previous else timestamp,
+                                                          called if previous else None)
 
     def _read_agent_alias(self, text: str) -> None:
         agent = AGENT_ID_PATTERN.search(text)
@@ -1051,15 +1063,17 @@ class SourceStore:
         notifications: dict[str, tuple[str, datetime]] = {}
         for task_id, notification in parent.notifications.items():
             notifications[parent.agent_aliases.get(task_id, task_id)] = notification
+        stopped_here = {parent.agent_aliases.get(task_id, task_id) for task_id in parent.stopped_tasks}
         agents: dict[str, dict[str, Any]] = {}
         for agent_id in sorted(agent_ids):
             transcript = self._transcript(directory / f"agent-{agent_id}.jsonl")
             status, ended = _agent_state(transcript, notifications.get(agent_id), now)
-            agents[agent_id] = self._agent(directory, agent_id, transcript, status, ended, warnings)
+            resolved = status == "stopped" and agent_id in stopped_here
+            agents[agent_id] = self._agent(directory, agent_id, transcript, status, ended, resolved, warnings)
         return agents
 
     def _agent(self, directory: Path, agent_id: str, transcript: _Transcript, status: str, ended: datetime | None,
-               warnings: list[str]) -> dict[str, Any]:
+               resolved: bool, warnings: list[str]) -> dict[str, Any]:
         meta_path = directory / f"agent-{agent_id}.meta.json"
         metadata = _read_json(meta_path, warnings) if _stat(meta_path) else {}
         return {
@@ -1068,7 +1082,7 @@ class SourceStore:
             "worktreeBranch": self._text(metadata, "worktreeBranch", "", warnings),
             "started": _iso(transcript.first), "ended": _iso(ended),
             "lastActivityAt": _iso(transcript.last_execution), "activity": transcript.activity,
-            "status": status,
+            "status": status, "resolved": resolved,
         }
 
     def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> list[dict[str, Any]]:
@@ -1076,7 +1090,9 @@ class SourceStore:
 
         A journal result line or the agent's own hand-back finishes an agent; a journal failure line fails it. The run's state is its background
         task's terminal notification; until then it runs while an agent runs and falls silent with its agents.
-        An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed."""
+        An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed.
+        An unfinished agent of an attempt a resume superseded is `stopped`. Unfinished work of a superseded attempt or
+        of a run the session stopped is resolved: the session already acted on it."""
         if session.transcript is None:
             return []
         workflows: list[tuple[datetime | None, dict[str, Any]]] = []
@@ -1085,6 +1101,7 @@ class SourceStore:
             notification = parent.notifications.get(launch.task_id) if launch else None
             run_ended = notification is not None and notification[0] not in LIVE_AGENT_STATUSES
             run_status, notified = notification if run_ended else ("running", None)
+            run_stopped_here = run_ended and launch.task_id in parent.stopped_tasks
             journal = self._journal(run / "journal.jsonl") or _Journal()
             name = launch.name if launch else run.name
             agents: list[dict[str, Any]] = []
@@ -1094,15 +1111,20 @@ class SourceStore:
                 transcript = self._transcript(run / f"agent-{agent_id}.jsonl")
                 firsts += [transcript.first] if transcript.first else []
                 lasts += [transcript.last_execution] if transcript.last_execution else []
+                superseded = (launch is not None and launch.resumed is not None and transcript.first is not None
+                              and transcript.first < launch.resumed)
                 if agent_id in journal.results:
                     status, ended = "completed", transcript.last_execution
                 elif agent_id in journal.failures:
                     status, ended = "failed", transcript.last_execution
+                elif superseded:
+                    status, ended = "stopped", transcript.last_execution
                 else:
                     status, ended = _agent_state(transcript, None, now)
                 if run_ended and ended is None:
                     status, ended = ("stopped" if run_status == "completed" else run_status), transcript.last_execution
-                agent = self._agent(run, agent_id, transcript, status, ended, warnings)
+                resolved = status != "completed" and (superseded or run_stopped_here)
+                agent = self._agent(run, agent_id, transcript, status, ended, resolved, warnings)
                 label, phase = journal.started.get(agent_id, ("", ""))
                 agent.update(description=label or agent["description"], phase=phase, workflow=name)
                 agents.append(agent)
@@ -1114,7 +1136,7 @@ class SourceStore:
             started = launch.launched if launch else min(firsts, default=None)
             workflows.append((started, {
                 "id": run.name, "name": name, "description": launch.summary if launch else "",
-                "status": run_status, "started": _iso(started),
+                "status": run_status, "resolved": run_stopped_here, "started": _iso(started),
                 "ended": _iso(notified), "lastActivityAt": _iso(last), "activity": "", "agents": agents,
             }))
         workflows.sort(key=lambda pair: (pair[0] is None, pair[0] or now))

@@ -6,7 +6,7 @@
 
 [sources.py](live_gantt/sources.py) reads Claude plans and transcripts. Task deletions persist; identity reads are bounded; custom titles win. Assistant response ends leave runtime unknown: Stop hooks may still run. Native status or a parent-turn event confirms the phase. Task or agent files establish chartability.
 
-Readers consume complete records by offset. Replacement, shrinkage, same-length changes or changed consumed-tail checkpoints rebuild history; edits preserving checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back; metadata and accounting cannot. Silence never means completion. Workflow journals supply identity and progress; results and hand-back finish agents, failure lines fail them. Running children keep workflows running; unfinished children inherit terminal workflow state. Metadata assigns agents to tasks.
+Readers consume complete records by offset. Replacement, shrinkage, same-length changes or changed consumed-tail checkpoints rebuild history; edits preserving checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back; metadata and accounting cannot. Silence never means completion. Workflow journals supply identity and progress; results and hand-back finish agents, failure lines fail them. Running children keep workflows running; unfinished children inherit terminal workflow state. Resumes keep the first launch; the session's resumes and stops resolve unfinished work. Metadata assigns agents to tasks.
 
 External runs require explicit endings; processes and logs prove observations, never completion. Invalid metadata warns and preserves unknown estimates; unknown keys cannot schedule work.
 
@@ -56,7 +56,7 @@ Observers retain only request metadata and flags. Gaps require fresh evidence; t
 
 ## Actionable monitoring
 
-[monitoring.py](live_gantt/monitoring.py) owns state, reason, last activity and bounded issues; reader evidence stays private. Messages, tools, logs and turns count as activity, not accounting or reads. Native phases require ownership. Failures and unresolved questions prevent completion. A later Claude transcript transition supersedes an older native observation; current contradictions still need attention.
+[monitoring.py](live_gantt/monitoring.py) owns state, reason, last activity and bounded issues; reader evidence stays private. Messages, tools, logs and turns count as activity, not accounting or reads. Native phases require ownership. Unresolved failures and questions prevent completion. A later Claude transcript transition supersedes an older native observation; current contradictions still need attention.
 
 Only current native pending approvals/input or explicit waiting proves input is needed. Codex logs omit transient approvals and some errors; recorded questions need attention, silence becomes unverified after five minutes, and liveness never proves progress. Fifteen minutes without an in-progress plan update needs attention even with a quiet transcript. Completion requires finished tasks, an idle parent and no pending/failed background work. Confirmed quota waiting cannot override continuing execution.
 

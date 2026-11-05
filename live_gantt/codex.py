@@ -583,4 +583,4 @@ class CodexSourceStore:
                 "ended": _iso(transcript.ended), "lastActivityAt": _iso(transcript.last_activity),
                 "activity": "Turn failed" if transcript.runtime_phase == "failed" else "Working" if transcript.running
                 else "Turn stopped" if transcript.interrupted else "Between turns",
-                "status": status}
+                "status": status, "resolved": False}
