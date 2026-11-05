@@ -6,7 +6,7 @@
 
 [sources.py](live_gantt/sources.py) reads Claude plans and transcripts. Task deletions persist; identity reads are bounded; custom titles win. Assistant response ends leave runtime unknown: Stop hooks may still run. Native status or a parent-turn event confirms the phase. Task or agent files establish chartability.
 
-Readers consume complete records by offset. Replacement, shrinkage, same-length changes or changed consumed-tail checkpoints rebuild history; edits preserving checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back; metadata and accounting cannot. Silence never means completion. Workflow journals supply identity and progress; results and hand-back finish agents. Running children keep workflows running; unfinished children inherit terminal workflow state. Metadata assigns agents to tasks.
+Readers consume complete records by offset. Replacement, shrinkage, same-length changes or changed consumed-tail checkpoints rebuild history; edits preserving checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back; metadata and accounting cannot. Silence never means completion. Workflow journals supply identity and progress; results and hand-back finish agents, failure lines fail them. Running children keep workflows running; unfinished children inherit terminal workflow state. Metadata assigns agents to tasks.
 
 External runs require explicit endings; processes and logs prove observations, never completion. Invalid metadata warns and preserves unknown estimates; unknown keys cannot schedule work.
 

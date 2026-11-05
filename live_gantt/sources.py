@@ -611,7 +611,8 @@ class _Identity:
 
 @dataclass
 class _Journal:
-    """An incrementally read journal: its count of result lines and, for a workflow's journal, which agents started and finished.
+    """An incrementally read journal: its count of result lines and, for a workflow's journal, which agents started,
+    finished and failed.
 
     `started` maps each agent identifier to its label and phase in start order."""
 
@@ -623,6 +624,7 @@ class _Journal:
     finished: int = 0
     started: dict[str, tuple[str, str]] = field(default_factory=dict)
     results: set[str] = field(default_factory=set)
+    failures: set[str] = field(default_factory=set)
 
     def _consume(self, line: bytes) -> None:
         if not RESULT_LINE_PATTERN.search(line) and b'"agentId"' not in line:
@@ -643,6 +645,8 @@ class _Journal:
             self.started[agent_id] = (label if isinstance(label, str) else "", phase if isinstance(phase, str) else "")
         elif record.get("type") == "result":
             self.results.add(agent_id)
+        elif record.get("type") == "failed":
+            self.failures.add(agent_id)
 
 
 @dataclass
@@ -1068,7 +1072,7 @@ class SourceStore:
     def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> list[dict[str, Any]]:
         """Return each workflow run with its agents in journal start order.
 
-        A journal result line or the agent's own hand-back finishes an agent. The run's state is its background
+        A journal result line or the agent's own hand-back finishes an agent; a journal failure line fails it. The run's state is its background
         task's terminal notification; until then it runs while an agent runs and falls silent with its agents.
         An agent still unfinished when its run ends takes the run's state, or `stopped` when the run completed."""
         if session.transcript is None:
@@ -1090,6 +1094,8 @@ class SourceStore:
                 lasts += [transcript.last_execution] if transcript.last_execution else []
                 if agent_id in journal.results:
                     status, ended = "completed", transcript.last_execution
+                elif agent_id in journal.failures:
+                    status, ended = "failed", transcript.last_execution
                 else:
                     status, ended = _agent_state(transcript, None, now)
                 if run_ended and ended is None:
