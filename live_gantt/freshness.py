@@ -12,6 +12,7 @@ from typing import Any
 STALE_PROGRESS_MINUTES = 15
 ACTIVE_SESSION_MINUTES = 5
 SILENT_RUN_MINUTES = 10
+FUTURE_RUN_TOLERANCE_MINUTES = 5
 SCHEDULING_FIELDS = ("estimate", "lane")
 FINISHED_STATUSES = frozenset({"completed", "deleted"})
 SECONDS_PER_MINUTE = 60
@@ -21,6 +22,7 @@ STALE_PROGRESS = "stale-progress"
 MISSING_PROGRESS = "missing-progress"
 SILENT_RUN = "silent-run"
 PROCESS_GONE = "process-gone"
+FUTURE_RUN = "future-run"
 
 
 def _time(value: str | None) -> datetime | None:
@@ -73,8 +75,21 @@ def _run_findings(task: dict, run: dict, session_active: bool, now: datetime) ->
     return []
 
 
+def _future_run_findings(task: dict, run: dict, now: datetime) -> list[dict]:
+    recorded = [moment for moment in (_time(run["started"]), _time(run["ended"])) if moment]
+    ahead = max(recorded) - now if recorded else None
+    if ahead is None or ahead <= timedelta(minutes=FUTURE_RUN_TOLERANCE_MINUTES):
+        return []
+    minutes = _whole_minutes(ahead)
+    return [_run_finding(FUTURE_RUN, task,
+                         f"Run '{run['label']}' of task #{task['id']} records a time {minutes} minutes in the future; "
+                         "record the observed start and end.",
+                         f"{minutes} min ahead")]
+
+
 def _task_findings(task: dict, session_active: bool, now: datetime) -> list[dict]:
-    findings = [finding for run in task["runs"] for finding in _run_findings(task, run, session_active, now)]
+    findings = [finding for run in task["runs"]
+                for finding in _run_findings(task, run, session_active, now) + _future_run_findings(task, run, now)]
     missing = _missing_schedule(task)
     if missing:
         findings.append(_finding(MISSING_SCHEDULE, task,
