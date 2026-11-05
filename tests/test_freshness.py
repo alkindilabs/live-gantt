@@ -139,6 +139,16 @@ class FutureRunRuleTests(unittest.TestCase):
         self.assertEqual((ended_ahead["rule"], ended_ahead["observed"]), ("future-run", "15 min ahead"))
 
 
+class UnclosedRunRuleTests(unittest.TestCase):
+    def test_a_completed_task_with_a_run_that_has_not_ended_is_a_finding_even_when_idle(self):
+        done = task("7", status="completed", metadata={}, runs=[run(log=None, log_updated=None), run(ended=ago(5))])
+        finding, = assess([done], None, NOW)["findings"]
+        self.assertEqual((finding["rule"], finding["taskId"], finding["observed"]), ("unclosed-run", "7", "task completed"))
+        self.assertEqual(finding["message"],
+                         "Task #7 is completed but its run 'job f' has not ended; record the observed end.")
+        self.assertEqual(rules([task(status="deleted", runs=[run()])]), [])
+
+
 class ProcessGoneRuleTests(unittest.TestCase):
     def test_exited_process_without_a_log_is_a_finding_even_when_idle(self):
         finding, = run_findings(log=None, log_updated=None, pid=4242, pid_alive=False, transcript_updated=None)
