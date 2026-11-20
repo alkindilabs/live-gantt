@@ -2,8 +2,9 @@
 
 A hook runs under whichever `python3` its harness finds first. Codex's background app-server
 daemon and desktop app start hooks with the login PATH, where macOS finds Apple's Python 3.9.
-This module therefore stays importable on older versions; each hook calls
-`require_supported_python()` before importing anything else from the package. Interactive
+This module therefore stays importable on older versions; each hook run as a script calls
+`require_supported_python()` before importing anything else from the package, so importing a
+hook never hands the importing process to another interpreter. Interactive
 commands run as `python3 -B -m live_gantt.python_support live_gantt.<module> [arguments]`.
 """
 

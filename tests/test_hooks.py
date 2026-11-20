@@ -330,6 +330,24 @@ class FreshnessHookTests(unittest.TestCase):
 
 
 SYSTEM_PYTHON = "/usr/bin/python3"
+IMPORT_UNDER_OLDER_PYTHON = """import sys
+from live_gantt import python_support
+sys.version_info = (3, 9)
+python_support.NEWER_PYTHONS = (sys.executable,)
+try:
+    import hooks.{hook}
+finally:
+    print("importer kept control")
+"""
+
+
+class HookImportTests(unittest.TestCase):
+    def test_importing_a_hook_under_an_older_python_never_hands_off_the_importer(self):
+        for hook in ("session_start", "task_created", "freshness"):
+            with self.subTest(hook=hook):
+                result = subprocess.run([sys.executable, "-B", "-c", IMPORT_UNDER_OLDER_PYTHON.format(hook=hook)],
+                                        cwd=REPOSITORY, capture_output=True, text=True, check=False)
+                self.assertEqual(result.stdout, "importer kept control\n", result.stderr)
 
 
 def python_version(executable):

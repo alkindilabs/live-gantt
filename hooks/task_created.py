@@ -10,7 +10,8 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 from live_gantt.python_support import require_supported_python
 
-require_supported_python()
+if __name__ == "__main__":
+    require_supported_python()
 
 from live_gantt.freshness import SCHEDULING_FIELDS
 
