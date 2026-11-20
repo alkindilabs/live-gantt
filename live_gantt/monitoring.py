@@ -111,7 +111,7 @@ def summarize(model, now, *, runtime=None, native=None):
         return result("attention", "The harness exited before completion could be confirmed.")
     if owner != "alive":
         return result("unverified", "The session's runtime ownership cannot be verified.",
-                      "Recent file changes alone do not establish that the harness is running.")
+                      "Recent file changes alone do not establish that the harness is running." if recent else None)
     if native_phase == "waiting":
         return result("needs_you", native.get("detail") or "The harness is waiting for your input or approval.")
     if native_phase == "unknown" and native.get("detail"):

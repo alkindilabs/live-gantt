@@ -124,6 +124,15 @@ class MonitoringTests(unittest.TestCase):
         self.model["liveness"]["status"] = "exited"
         self.assertEqual(self.read()["state"], "attention")
 
+    def test_unknown_owner_cites_recent_file_changes_only_when_there_are_some(self):
+        claim = "Recent file changes alone do not establish that the harness is running."
+        self.model["liveness"]["status"] = "unknown"
+        self.assertIn(claim, self.read()["issues"])
+        self.runtime["lastActivityAt"] = (NOW - timedelta(days=14)).isoformat()
+        result = self.read()
+        self.assertEqual(result["state"], "unverified")
+        self.assertNotIn(claim, result["issues"])
+
     def test_active_external_work_prevents_plan_complete_or_provider_wait(self):
         self.native["phase"] = "idle"
         run = {"label": "Build", "ended": None, "pidAlive": True, "lastActivityAt": NOW.isoformat()}
