@@ -59,9 +59,8 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(window["forecast"]["status"], "stale")
         self.assertEqual(window["freshnessBasis"], "unknown")
 
-    def test_reset_regression_source_and_duration_break_history(self):
-        changes = [dict(reset=NOW + timedelta(hours=3)), dict(source="session-b"),
-                   dict(duration=10080), dict(bucket="other"), dict()]
+    def test_reset_regression_duration_and_bucket_break_history(self):
+        changes = [dict(reset=NOW + timedelta(hours=3)), dict(duration=10080), dict(bucket="other"), dict()]
         for fields in changes:
             with self.subTest(fields=fields):
                 earlier = snapshot(70, minutes=-10)
@@ -141,12 +140,12 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(provider(UsageStore(), [sample])["windows"][0]["freshnessBasis"], "unknown")
 
     def test_timestamp_ordering_handles_fractional_seconds(self):
-        earlier = snapshot(20, source="earlier")
-        later = snapshot(40, source="later")
+        earlier = snapshot(40, source="earlier")
+        later = snapshot(20, source="later", reset=NOW + timedelta(hours=3))
         later["capturedAt"] = "2026-10-18T12:00:00.000001Z"
-        result = provider(UsageStore(), [later, earlier], NOW + timedelta(seconds=1))
+        result = provider(UsageStore(), [earlier, later], NOW + timedelta(seconds=1))
         self.assertEqual(result["sourceId"], "later")
-        self.assertEqual(result["windows"][0]["usedPercent"], 40)
+        self.assertEqual(result["windows"][0]["usedPercent"], 20)
 
 
     def test_replaying_history_beyond_capacity_preserves_forecast(self):
@@ -157,6 +156,37 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(current["windows"][0]["forecast"],
                          {"status": "predicted", "exhaustsAt": "2026-10-18T12:20:00Z",
                           "basis": "recorded_changes", "sampleSeconds": 600.0})
+
+    def test_concurrent_sessions_report_the_highest_reading_of_one_reset_period(self):
+        starting = snapshot(0, source="session-c")
+        starting["windows"] = []
+        result = provider(UsageStore(), [snapshot(40, minutes=-10), snapshot(50, minutes=-4, source="session-b"),
+                                         snapshot(45, minutes=-1), starting])
+        window, = result["windows"]
+        self.assertEqual((result["sourceId"], window["usedPercent"], window["observedAt"]),
+                         ("session-b", 50, iso(NOW - timedelta(minutes=4))))
+        self.assertEqual(window["forecast"], {"status": "predicted", "exhaustsAt": "2026-10-18T12:26:00Z",
+                                             "basis": "recorded_changes", "sampleSeconds": 360.0})
+
+    def test_a_reading_several_sessions_report_ages_from_its_first_report(self):
+        result = provider(UsageStore(), [snapshot(45, minutes=-8, source="session-b"), snapshot(50, minutes=-6),
+                                         snapshot(50, minutes=-2, source="session-b")])
+        window, = result["windows"]
+        self.assertEqual((result["sourceId"], window["observedAt"], window["stale"]),
+                         ("session-a", iso(NOW - timedelta(minutes=6)), True))
+
+    def test_a_live_reset_period_outranks_a_session_reporting_an_expired_one(self):
+        renewed = snapshot(5, minutes=-1, source="session-b", reset=NOW + timedelta(hours=5))
+        result = provider(UsageStore(), [renewed, snapshot(90, reset=NOW - timedelta(minutes=1))])
+        window, = result["windows"]
+        self.assertEqual((result["sourceId"], window["usedPercent"], window["stale"]), ("session-b", 5, False))
+
+    def test_a_session_decrease_within_a_period_follows_the_newest_capture(self):
+        result = provider(UsageStore(), [snapshot(70, minutes=-10), snapshot(65, minutes=-5, source="session-b"),
+                                         snapshot(20)])
+        window, = result["windows"]
+        self.assertEqual((result["sourceId"], window["usedPercent"]), ("session-a", 20))
+        self.assertEqual(window["forecast"]["status"], "insufficient_history")
 
     def test_future_input_cannot_evict_earlier_valid_observations(self):
         future = [snapshot(40, minutes=20, source=f"future-{index}") for index in range(600)]

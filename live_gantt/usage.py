@@ -27,6 +27,7 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 PERCENT_LIMIT = 100
 MINUTES_PER_HOUR = 60
 MINUTES_PER_DAY = 1440
+EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def empty_token_usage():
@@ -174,41 +175,81 @@ def _same_window(current, previous):
     return current_reset is not None and current_reset == _date(previous["resetsAt"])
 
 
-def _samples(history, latest, current, now):
-    samples = []
-    for snapshot in history:
-        if snapshot["sourceId"] != latest["sourceId"] or snapshot["bucketId"] != latest["bucketId"]:
-            continue
+def _instant(window):
+    return _date(window["measuredAt"] or window["observedAt"])
+
+
+def _period_readings(snapshots, current):
+    for snapshot in snapshots:
         window = next((row for row in snapshot["windows"] if row["id"] == current["id"]), None)
-        if not _same_window(current, window):
-            samples = []
-            continue
+        if _same_window(current, window) and window["usedPercent"] is not None:
+            yield snapshot["sourceId"], window
+
+
+def _samples(snapshots, current, now):
+    samples, latest_by_source, monotonic = [], {}, True
+    for source, window in _period_readings(snapshots, current):
         percent = window["usedPercent"]
-        if percent is None:
-            samples = []
-            continue
-        instant = _date(window["measuredAt"] or window["observedAt"])
-        if samples and percent < samples[-1][1]:
-            samples = []
-        if not samples or (percent != samples[-1][1] or instant != samples[-1][0]):
+        instant = _instant(window)
+        if percent < latest_by_source.get(source, percent):
+            samples, monotonic = [], False
+        latest_by_source[source] = percent
+        remeasured = (bool(samples) and percent == samples[-1][1] and window["measuredAt"] is not None
+                      and instant > samples[-1][0])
+        if not samples or percent > samples[-1][1] or remeasured:
             samples.append((instant, percent))
-    return [sample for sample in samples if now - FORECAST_HORIZON <= sample[0] <= now]
+    return [sample for sample in samples if now - FORECAST_HORIZON <= sample[0] <= now], monotonic
 
 
-def _window_state(provider, history, latest, current, now):
+def _expired(window, now):
+    reset = _date(window["resetsAt"])
+    return reset is not None and now >= reset
+
+
+def _freshest(reading):
+    _, window = reading
+    measured = _date(window["measuredAt"]) or EARLIEST
+    return window["usedPercent"], measured, -_date(window["observedAt"]).timestamp()
+
+
+def _bucket_windows(bucket, snapshots, now):
+    """Yield each window's reading source and state from the bucket's capture-ordered snapshots."""
+    latest_by_source = {snapshot["sourceId"]: snapshot for snapshot in snapshots}
+    captured_at = max(snapshots, key=lambda entry: _date(entry["capturedAt"]))["capturedAt"]
+    known = {window["id"]: window for entry in snapshots for window in entry["windows"]}
+    for role, previous in known.items():
+        readings = [(snapshot, window) for snapshot in latest_by_source.values() for window in snapshot["windows"]
+                    if window["id"] == role and window["usedPercent"] is not None]
+        if not readings:
+            unavailable = {**previous, "usedPercent": None, "resetsAt": None,
+                           "measuredAt": None, "observedAt": captured_at}
+            yield None, _window_state(bucket, captured_at, unavailable, [], now)
+            continue
+        anchor_snapshot, anchor = max(readings, key=lambda reading: (not _expired(reading[1], now),
+                                                                      _date(reading[0]["capturedAt"])))
+        samples, monotonic = _samples(snapshots, anchor, now)
+        if not monotonic:
+            readings = [(anchor_snapshot, anchor)]
+            samples, _ = _samples([entry for entry in snapshots if entry["sourceId"] == anchor_snapshot["sourceId"]],
+                                  anchor, now)
+        source, current = max(((snapshot["sourceId"], window) for snapshot, window in readings
+                               if _same_window(anchor, window)), key=_freshest)
+        yield source, _window_state(bucket, captured_at, current, samples, now)
+
+
+def _window_state(bucket, captured_at, current, samples, now):
     captured = _date(current["observedAt"])
     measured = _date(current["measuredAt"])
-    samples = _samples(history, latest, current, now)
     freshness = "provider_measurement" if measured else "recorded_change" if len(samples) > 1 else "unknown"
     reset = _date(current["resetsAt"])
     available = current["usedPercent"] is not None
-    stale = available and (now - (measured or captured) > STALE_AFTER or (reset is not None and now >= reset))
+    stale = available and (now - _instant(current) > STALE_AFTER or _expired(current, now))
     if not available:
         forecast = _forecast("unavailable")
     elif stale:
         forecast = _forecast("stale")
     elif current["usedPercent"] == PERCENT_LIMIT:
-        forecast = _forecast("reached", exhausts=measured or captured, basis="recorded_changes")
+        forecast = _forecast("reached", exhausts=_instant(current), basis="recorded_changes")
     elif len(samples) < 2 or samples[-1][0] - samples[0][0] < MINIMUM_SAMPLE_SPAN:
         forecast = _forecast("insufficient_history")
     else:
@@ -225,36 +266,29 @@ def _window_state(provider, history, latest, current, now):
                             _forecast("predicted", exhausts=exhaustion, basis="recorded_changes", seconds=seconds))
             except OverflowError:
                 forecast = _forecast("resets_first" if reset else "unavailable", basis="recorded_changes", seconds=seconds)
-    return {"id": current["id"], "bucketId": latest["bucketId"],
+    return {"id": current["id"], "bucketId": bucket,
             "label": current.get("label") or _label(current["windowMinutes"], current["id"]),
             "windowMinutes": current["windowMinutes"], "usedPercent": current["usedPercent"],
-            "resetsAt": current["resetsAt"], "capturedAt": latest["capturedAt"],
+            "resetsAt": current["resetsAt"], "capturedAt": captured_at,
             "observedAt": _iso(captured),
             "measuredAt": current["measuredAt"], "freshnessBasis": freshness, "stale": stale,
             "forecast": forecast}
 
 
 def _provider_state(provider, history, now):
-    latest_by_bucket = {}
-    for snapshot in history:
-        latest_by_bucket[snapshot["bucketId"]] = snapshot
-    windows = []
-    for bucket, latest in sorted(latest_by_bucket.items()):
-        current = {window["id"]: window for window in latest["windows"]}
-        known = {window["id"]: window for entry in history if entry["bucketId"] == bucket
-                 for window in entry["windows"]}
-        for role, previous in known.items():
-            window = current.get(role)
-            if window is None:
-                window = {**previous, "usedPercent": None, "resetsAt": None,
-                          "measuredAt": None, "observedAt": latest["capturedAt"]}
-            windows.append(_window_state(provider, history, latest, window, now))
+    windows, reported = [], []
+    for bucket in sorted({snapshot["bucketId"] for snapshot in history}):
+        for source, window in _bucket_windows(bucket, [entry for entry in history if entry["bucketId"] == bucket], now):
+            windows.append(window)
+            if source is not None:
+                reported.append((_instant(window), source))
     readable = [window for window in windows if window["usedPercent"] is not None]
     status = "available" if any(not window["stale"] for window in readable) else "stale" if readable else "unavailable"
     latest = max(history, key=lambda entry: _date(entry["capturedAt"])) if history else None
+    source = max(reported)[1] if reported else latest["sourceId"] if latest else None
     message = {"available": "Quota observations are available.", "stale": "Recorded quota is stale.",
                "unavailable": "No readable quota observations."}[status]
-    return {"provider": provider, "status": status, "sourceId": latest["sourceId"] if latest else None,
+    return {"provider": provider, "status": status, "sourceId": source,
             "windows": windows, "message": message}
 
 
