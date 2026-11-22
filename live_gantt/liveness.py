@@ -17,7 +17,7 @@ import struct
 import subprocess
 import time
 
-from .sources import LIST_ID
+from .sources import LIST_ID, MILLISECONDS_PER_SECOND
 
 
 CACHE_SECONDS = 2.0
@@ -34,7 +34,6 @@ LSOF = "/usr/sbin/lsof"
 UNKNOWN_DETAIL = "Session liveness could not be verified."
 ALIVE_DETAIL = "Native session ownership is verified; this does not prove responsiveness or progress."
 EXITED_DETAIL = "The process previously associated with this session has exited or its identity changed."
-MILLISECONDS_PER_SECOND = 1000
 CLAUDE_PHASES = {"busy": "working", "shell": "working", "waiting": "waiting", "idle": "idle"}
 CLAUDE_WAITING_DETAILS = {
     "permission prompt": "Permission is required.",

@@ -10,14 +10,15 @@ import threading
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any
 
-from .command_timings import CommandTimings, summarize_command_timings
+from .command_timings import COMMAND_COMPLETED, COMMAND_FAILED, CommandTimings, summarize_command_timings
 from .freshness import session_active
-from .sources import (DEFAULT_MILESTONE, LIST_ID, RECENT_SESSION_WINDOW, SILENT_AFTER, TASK_STATUSES, UTC,
-                      _finite, _iso, _prompt_title, _regular_stat, append_checkpoint, parse_time)
+from .sources import (DEFAULT_MILESTONE, LIST_ID, MILLISECONDS_PER_SECOND, RECENT_SESSION_WINDOW, SILENT_AFTER,
+                      TASK_STATUSES, UTC, _finite, _iso, _prompt_title, _regular_stat, append_checkpoint, parse_time)
 from .usage import PERCENT_LIMIT, empty_token_usage
 
 
@@ -33,7 +34,11 @@ MAX_PENDING_NATIVE_CALLS = 32
 NATIVE_PLAN_LANE = "Native plan"
 PLAN_SUCCESS_OUTPUT = "Plan updated"
 NANOSECONDS_PER_SECOND = 1_000_000_000
-EXEC_EXIT_HEADER = re.compile(r"\AChunk ID: [^\r\n]+\r?\nWall time: [^\r\n]+\r?\nProcess exited with code -?\d+\r?\n")
+SECONDS_PER_MILLISECOND = Decimal(1) / MILLISECONDS_PER_SECOND
+EXEC_EXIT_HEADER = re.compile(r"\AChunk ID: [^\r\n]+\r?\nWall time: (?P<elapsed>[^\r\n]+)\r?\n"
+                              r"Process exited with code (?P<code>-?[0-9]+)\r?\n")
+EXEC_OUTPUT_HEADER = re.compile(r"(?:Original token count: [0-9]+\r?\n)?(?:Final output|Output):\r?\n")
+EXEC_ELAPSED_SECONDS = re.compile(r"([0-9]+(?:\.[0-9]+)?) seconds")
 SESSION_FILENAME_ID = re.compile(r"([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$")
 TOKEN_FIELDS = {
     "inputTokens": "input_tokens", "cachedInputTokens": "cached_input_tokens",
@@ -75,17 +80,35 @@ def _decode(line: bytes) -> dict:
         return {}
 
 
-def _command_exited(output: object) -> bool:
+def _process_milliseconds(seconds: Decimal) -> int | None:
+    if 0 <= seconds <= timedelta.max.total_seconds():
+        return int(seconds.quantize(SECONDS_PER_MILLISECOND, rounding=ROUND_DOWN) / SECONDS_PER_MILLISECOND)
+    return None
+
+
+def _command_outcome(exit_code: int | str) -> str:
+    return COMMAND_COMPLETED if Decimal(exit_code).is_zero() else COMMAND_FAILED
+
+
+def _command_result(output: object) -> tuple[str, tuple[str, ...], int | None] | None:
     if isinstance(output, str):
-        if EXEC_EXIT_HEADER.match(output):
-            return True
+        header = EXEC_EXIT_HEADER.match(output)
+        if header:
+            elapsed = EXEC_ELAPSED_SECONDS.fullmatch(header["elapsed"])
+            body = EXEC_OUTPUT_HEADER.match(output, header.end())
+            return (_command_outcome(header["code"]), (output[body.end():],) if body else (),
+                    _process_milliseconds(Decimal(elapsed[1])) if elapsed else None)
         try:
             output = json.loads(output)
         except (ValueError, RecursionError):
-            return False
-    if not isinstance(output, dict) or output.get("session_id") is not None:
-        return False
-    return type(output.get("exit_code")) is int
+            return None
+    if (not isinstance(output, dict) or output.get("session_id") is not None
+            or type(output.get("exit_code")) is not int):
+        return None
+    body = output.get("output")
+    elapsed = output.get("wall_time_seconds")
+    return (_command_outcome(output["exit_code"]), (body,) if isinstance(body, str) else (),
+            _process_milliseconds(Decimal(str(elapsed))) if _finite(elapsed) else None)
 
 
 def _discovery_error(error):
@@ -341,10 +364,12 @@ class _Transcript:
                 arguments = {}
             self.command_timings.start(call_id, _object(arguments).get("cmd"), timestamp)
         elif kind == "function_call_output" and self.command_timings.awaiting(call_id):
-            if _command_exited(payload.get("output")):
-                self.command_timings.finish(call_id, timestamp)
-            else:
+            result = _command_result(payload.get("output"))
+            if result is None:
                 self.command_timings.unmeasured(call_id)
+            else:
+                outcome, output, process_ms = result
+                self.command_timings.finish(call_id, timestamp, outcome=outcome, output=output, process_ms=process_ms)
 
     def consume(self, record: dict, source_id: str, *, include_command_timings: bool = True) -> None:
         timestamp = parse_time(record.get("timestamp"))

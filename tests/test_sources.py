@@ -88,12 +88,103 @@ class SourceStoreTests(unittest.TestCase):
         self.assertEqual(self.state()["commandTimings"], {
             "operations": [{"label": "git status", "calls": 3, "totalMs": 9000, "longestMs": 4000}],
             "unmeasured": 3,
+            "leaderDetail": {
+                "label": "git status",
+                "slowestCalls": [
+                    {"elapsedMs": 4000, "outcome": "completed", "reviewProvider": None},
+                    {"elapsedMs": 3000, "outcome": "completed", "reviewProvider": None},
+                    {"elapsedMs": 2000, "outcome": "completed", "reviewProvider": None},
+                ],
+                "outcomes": [{"outcome": "completed", "calls": 3, "totalMs": 9000}],
+                "reviews": [], "processTiming": None,
+            },
         })
         self.append(self.result("2026-10-15T10:00:01Z", "", "pending"))
         self.assertEqual(self.state()["commandTimings"], {
             "operations": [{"label": "git status", "calls": 4, "totalMs": 10000, "longestMs": 4000}],
             "unmeasured": 2,
+            "leaderDetail": {
+                "label": "git status",
+                "slowestCalls": [
+                    {"elapsedMs": 4000, "outcome": "completed", "reviewProvider": None},
+                    {"elapsedMs": 3000, "outcome": "completed", "reviewProvider": None},
+                    {"elapsedMs": 2000, "outcome": "completed", "reviewProvider": None},
+                    {"elapsedMs": 1000, "outcome": "completed", "reviewProvider": None},
+                ],
+                "outcomes": [{"outcome": "completed", "calls": 4, "totalMs": 10000}],
+                "reviews": [], "processTiming": None,
+            },
         })
+
+    def test_batched_background_launch_preserves_the_foreground_command_timing(self):
+        started = "2026-10-15T10:00:00Z"
+        finished = "2026-10-15T10:00:02Z"
+        batch = self.result(finished, "foreground output mentions task-id", "foreground")
+        batch["message"]["content"].append({
+            "type": "tool_result", "tool_use_id": "background", "is_error": False,
+            "content": "Command was manually backgrounded by user with ID: task-id. Output is being written to: /example/log",
+        })
+        batch["toolUseResult"] = {"backgroundTaskId": "task-id", "backgroundedByUser": True}
+        self.append(self.tool(started, "Bash", {"command": "git status"}, "foreground"),
+                    self.tool(started, "Bash", {"command": "npm test"}, "background"), batch)
+
+        timings = self.state()["commandTimings"]
+        self.assertEqual(timings["operations"], [{"label": "git status", "calls": 1, "totalMs": 2000, "longestMs": 2000}])
+        self.assertEqual(timings["unmeasured"], 1)
+
+    def test_ambiguous_batched_background_launch_keeps_only_confirmed_terminal_timings(self):
+        started = "2026-10-15T10:00:00Z"
+        finished = "2026-10-15T10:00:02Z"
+        batch = self.result(finished, "first result", "first")
+        batch["message"]["content"].extend((
+            {"type": "tool_result", "tool_use_id": "second", "content": "second result"},
+            {"type": "tool_result", "tool_use_id": "failed", "content": "command failed", "is_error": True},
+        ))
+        batch["toolUseResult"] = {"backgroundTaskId": "task-id"}
+        self.append(self.tool(started, "Bash", {"command": "git status"}, "first"),
+                    self.tool(started, "Bash", {"command": "npm test"}, "second"),
+                    self.tool(started, "Bash", {"command": "git diff"}, "failed"), batch)
+
+        timings = self.state()["commandTimings"]
+        self.assertEqual(timings["operations"], [{"label": "git diff", "calls": 1, "totalMs": 2000, "longestMs": 2000}])
+        self.assertEqual(timings["unmeasured"], 2)
+        self.assertEqual(timings["leaderDetail"]["outcomes"], [{"outcome": "failed", "calls": 1, "totalMs": 2000}])
+
+    def test_claude_command_diagnosis_keeps_batched_evidence_with_its_result(self):
+        started = "2026-10-15T10:00:00Z"
+        finished = "2026-10-15T10:00:02Z"
+        claude_marker = "principles-gate: reviewing staged changes with claude"
+        codex_marker = "principles-gate: reviewing staged changes with codex"
+        rejected_marker = "principles-gate: codex review did not pass; principles could not be verified"
+        batch = self.result(finished, "commit output", "plain")
+        batch["message"]["content"].append({"type": "tool_result", "tool_use_id": "rejected", "is_error": True,
+                                              "content": [{"type": "text", "text": f"{codex_marker}\n{rejected_marker}"}]})
+        batch["toolUseResult"] = {"stdout": claude_marker}
+        batch["toolDenialKind"] = "permission-rule"
+        structured = {**self.result(finished, "commit output", "reviewed"),
+                      "toolUseResult": {"stdout": "private output", "stderr": claude_marker}}
+        wrapped_error = {**self.result(finished, "commit error", "wrapped-error"),
+                         "toolUseResult": f"private error\n{codex_marker}\n{rejected_marker}"}
+        wrapped_error["message"]["content"][0]["is_error"] = True
+        denied = {**self.result(finished, "private denial", "denied"), "toolDenialKind": "user-rejected"}
+        denied["message"]["content"][0]["is_error"] = True
+        self.append(*(self.tool(started, "Bash", {"command": "git commit"}, call_id)
+                      for call_id in ("plain", "rejected", "reviewed", "wrapped-error", "denied")),
+                    batch, structured, wrapped_error, denied)
+
+        detail = self.state()["commandTimings"]["leaderDetail"]
+        self.assertEqual(detail["outcomes"], [
+            {"outcome": "completed", "calls": 2, "totalMs": 4000},
+            {"outcome": "denied", "calls": 1, "totalMs": 2000},
+            {"outcome": "reviewRejected", "calls": 2, "totalMs": 4000},
+        ])
+        self.assertEqual(detail["reviews"], [
+            {"provider": "claude", "calls": 1, "totalMs": 2000, "rejectedCalls": 0, "rejectedMs": 0},
+            {"provider": "codex", "calls": 2, "totalMs": 4000, "rejectedCalls": 2, "rejectedMs": 4000},
+            {"provider": None, "calls": 2, "totalMs": 4000, "rejectedCalls": 0, "rejectedMs": 0},
+        ])
+        self.assertIsNone(detail["processTiming"])
+        self.assertNotIn("private", json.dumps(detail))
 
     def test_runtime_activity_ignores_metadata_accounting_and_malformed_records(self):
         self.append({"type": "user", "timestamp": "2026-10-15T09:00:00Z", "message": {"content": "Please build it"}})
