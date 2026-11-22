@@ -322,6 +322,68 @@ test("command timings rank total elapsed time and retain disclosure after live u
   }
 });
 
+test("quota readings show previous windows and last known usage until a live capture replaces them", async () => {
+  const viewport = { width: 390, height: 844 };
+  const page = await browser.newPage({ viewport });
+  const session = "quota-readings";
+  const at = Date.now();
+  const minute = 60_000;
+  const resetAfter = 10_000;
+  const imminentReset = new Date(at + resetAfter).toISOString();
+  const iso = offset => new Date(at + offset * minute).toISOString();
+  const { model, usage } = fixture();
+  const provider = usage.providers[0];
+  const feed = { model: { ...model, id: session } };
+  const [fiveHour, weekly] = provider.windows;
+  const stale = { status: "stale", basis: null, exhaustsAt: null, sampleSeconds: null };
+  Object.assign(fiveHour, { label: "5 hours", usedPercent: 3, stale: true, freshnessBasis: "unknown", resetsAt: iso(-5),
+    observedAt: iso(-30), capturedAt: iso(-30), forecast: stale });
+  Object.assign(weekly, { label: "7 days", usedPercent: 54, stale: true, resetsAt: imminentReset,
+    observedAt: iso(-8), capturedAt: iso(0), forecast: stale });
+  provider.windows = [fiveHour, weekly];
+  provider.status = "stale";
+  const publish = () => feed.response.write(`event: usage\ndata: ${JSON.stringify({ providers: [provider] })}\n\n`);
+  try {
+    forecastSessions.set(session, feed);
+    await page.clock.install({ time: at });
+    await page.goto(address.replace(SESSION_ID, session));
+    await openOverview(page, viewport);
+    await page.getByRole("heading", { name: "Primary window" }).first().waitFor();
+    publish();
+    const card = page.locator(".usage-provider", { has: page.getByRole("heading", { name: "Claude Code" }) });
+    const short = card.locator(".usage-window", { hasText: "5 hours" });
+    const week = card.locator(".usage-window", { hasText: "7 days" });
+    await short.getByRole("heading", { name: "5 hours" }).waitFor();
+    assert.equal(await short.locator(".usage-percent").innerText(), "Unknown");
+    assert.equal(await short.getByRole("progressbar").count(), 0);
+    assert.equal(await week.locator(".usage-percent").innerText(), "54%");
+    assert.match(await week.innerText(), /Last known/);
+    assert.match(await week.innerText(), /8 min ago/);
+    await card.locator("summary").click();
+    const details = card.locator(".disclosure-content");
+    assert.match(await details.innerText(), /Previous window.*3%/s);
+    assert.doesNotMatch(await details.innerText(), /No increase observed means/);
+    weekly.measuredAt = iso(-6);
+    publish();
+    await week.getByText(/6 min ago/).waitFor();
+    await page.clock.fastForward(resetAfter);
+    await week.getByText("Window ended", { exact: true }).waitFor({ timeout: 3000 });
+    assert.equal(await week.locator(".usage-percent").innerText(), "Unknown");
+    Object.assign(weekly, { usedPercent: 55, observedAt: imminentReset, measuredAt: imminentReset, capturedAt: imminentReset, stale: false,
+      resetsAt: iso(60), forecast: { status: "insufficient_history" } });
+    provider.status = "available";
+    publish();
+    await week.getByText("55%", { exact: true }).waitFor();
+    assert.equal(await week.getByRole("progressbar").count(), 1);
+    assert.doesNotMatch(await week.innerText(), /Last known|Window ended/);
+    assert.equal(await card.locator("details").getAttribute("open"), "");
+    await assertFixedDocument(page, viewport);
+  } finally {
+    forecastSessions.delete(session);
+    await page.close();
+  }
+});
+
 test("finish history keeps observed revisions, unknown estimates and completed milestone history across reloads", async () => {
   const page = await browser.newPage({ viewport: VIEWPORTS[0] });
   const session = "forecast-history";
