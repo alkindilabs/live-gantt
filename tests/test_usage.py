@@ -170,10 +170,20 @@ class UsageTests(unittest.TestCase):
 
     def test_a_reading_several_sessions_report_ages_from_its_first_report(self):
         result = provider(UsageStore(), [snapshot(45, minutes=-8, source="session-b"), snapshot(50, minutes=-6),
-                                         snapshot(50, minutes=-2, source="session-b")])
+                                         snapshot(50, minutes=-2, source="session-b"),
+                                         snapshot(49, source="lagging-session")])
         window, = result["windows"]
         self.assertEqual((result["sourceId"], window["observedAt"], window["stale"]),
                          ("session-a", iso(NOW - timedelta(minutes=6)), True))
+        self.assertEqual(window["capturedAt"], iso(NOW - timedelta(minutes=2)))
+
+    def test_weekly_capture_cannot_renew_an_expired_short_windows_capture_time(self):
+        short = snapshot(3, minutes=-90, reset=NOW - timedelta(hours=1))
+        weekly = snapshot(54, role="secondary", duration=10080, source="session-b")
+        result = provider(UsageStore(), [short, weekly])
+        windows = {window["id"]: window for window in result["windows"]}
+        self.assertEqual(windows["primary"]["capturedAt"], short["capturedAt"])
+        self.assertEqual(windows["secondary"]["capturedAt"], weekly["capturedAt"])
 
     def test_a_live_reset_period_outranks_a_session_reporting_an_expired_one(self):
         renewed = snapshot(5, minutes=-1, source="session-b", reset=NOW + timedelta(hours=5))

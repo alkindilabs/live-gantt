@@ -98,6 +98,7 @@ const state = {
   model: null,
   commandTimingsExpanded: false,
   usage: null,
+  nextUsageReset: null,
   usageAges: [],
   usageForecasts: [],
   usagePaceHeadings: [],
@@ -695,10 +696,20 @@ function usageForecastPassed(window, now) {
   return window.forecast?.status === "predicted" && exhaustion !== null && exhaustion <= now;
 }
 
+function usageWindowEnded(window, now) {
+  const reset = timestamp(window.resetsAt);
+  return reset !== null && reset <= now;
+}
+
+function usageIsStale(window) {
+  return window.stale || window.forecast?.status === "stale";
+}
+
 function usageForecast(window, now) {
   const forecast = window.forecast || {};
   const exhaustion = timestamp(forecast.exhaustsAt);
-  if (window.stale || forecast.status === "stale") return "Stale; no current estimate";
+  if (usageWindowEnded(window, now)) return "Awaiting new window";
+  if (usageIsStale(window)) return "No current estimate";
   if (forecast.status === "reached") return "Limit reached";
   if (forecast.status === "predicted" && exhaustion !== null) return usageForecastPassed(window, now)
     ? "Awaiting fresh usage" : `Runs out ${forecastTime(exhaustion, now)}`;
@@ -710,7 +721,8 @@ function usageForecast(window, now) {
 
 function usagePaceTooltip(window, now) {
   const forecast = window.forecast || {};
-  if (window.stale || forecast.status === "stale") return "Observation window unavailable: usage is stale.";
+  if (usageWindowEnded(window, now)) return "The reported quota window has ended.";
+  if (usageIsStale(window)) return "A fresh quota reading is needed for an estimate.";
   const passed = usageForecastPassed(window, now);
   if (forecast.basis === "provider") return passed ? "Previous provider estimate has passed; awaiting fresh usage."
     : "Forecast supplied by provider; no local observation window used.";
@@ -728,7 +740,7 @@ function paintUsageForecasts(now) {
   for (const { field, window } of state.usageForecasts) {
     field.firstElementChild.textContent = usageForecast(window, now);
     field.title = usagePaceTooltip(window, now);
-    field.classList.toggle("is-warning", Boolean(window.stale || window.forecast?.status === "stale"
+    field.classList.toggle("is-warning", Boolean(usageWindowEnded(window, now) || usageIsStale(window)
       || window.forecast?.status === "reached" || usageForecastPassed(window, now)));
   }
   for (const { field, windows } of state.usagePaceHeadings) {
@@ -746,6 +758,7 @@ function addUsageAge(container, label, value, now) {
 
 function renderUsage(data) {
   state.usage = data;
+  state.nextUsageReset = null;
   state.usageAges = [];
   state.usageForecasts = [];
   state.usagePaceHeadings = [];
@@ -782,15 +795,20 @@ function renderUsage(data) {
     }
     if (windows.length) card.append(columns);
     for (const window of windows) {
+      const reset = timestamp(window.resetsAt);
+      const ended = usageWindowEnded(window, now);
+      const stale = usageIsStale(window);
+      if (reset !== null && !ended) state.nextUsageReset = Math.min(state.nextUsageReset ?? reset, reset);
       const section = node("section", "usage-window");
       const title = node("div", "usage-window-heading");
       title.append(node("h4", "", window.label || "Usage window"));
-      if (window.stale) title.append(node("span", "usage-status is-stale", "Stale"));
+      if (ended || stale) title.append(node("span", "usage-status is-stale", ended ? "Window ended" : "Last known"));
       section.append(title);
       const known = typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent);
+      const percentage = known ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(window.usedPercent)}%` : "Unknown";
       const amount = node("div", "usage-amount");
-      amount.append(node("strong", "usage-percent", known ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(window.usedPercent)}%` : "Unknown"));
-      if (known) {
+      amount.append(node("strong", "usage-percent", ended ? "Unknown" : percentage));
+      if (known && !ended && !stale) {
         const meter = node("progress", "usage-meter");
         meter.max = PERCENT_SCALE;
         meter.value = window.usedPercent;
@@ -798,17 +816,20 @@ function renderUsage(data) {
         amount.append(meter);
       }
       section.append(amount);
-      const reset = timestamp(window.resetsAt);
-      section.append(node("p", "usage-reset", reset === null ? "Unknown" : forecastTime(reset, now)));
+      section.append(node("p", "usage-reset", ended || reset === null ? "Unknown" : forecastTime(reset, now)));
       const forecast = node("div", "usage-forecast");
       const basis = window.forecast?.basis;
       forecast.append(node("p"));
+      const readingAt = window.measuredAt || window.observedAt;
+      if (!ended && stale && timestamp(readingAt) !== null) {
+        addUsageAge(forecast, window.measuredAt ? "Measured" : "Observed", readingAt, now);
+      }
       state.usageForecasts.push({ field: forecast, window });
       section.append(forecast);
       const ages = node("div", "usage-ages");
       ages.append(node("strong", "", window.label || "Usage window"));
-      ages.append(node("span", "", basis === "provider" ? "Forecast supplied by provider" : basis === "recorded_changes" ? "Forecast estimated from observed usage over time" : "No recorded forecast basis"));
-      ages.append(node("span", "", "No increase observed means there is no exhaustion estimate; collecting history requires more observations."));
+      if (ended && known) ages.append(node("span", "", `Previous window used ${percentage} and ended ${dateTime(reset)}.`));
+      if (basis) ages.append(node("span", "", basis === "provider" ? "Forecast supplied by provider" : "Forecast estimated from observed usage over time"));
       if (timestamp(window.capturedAt) !== null) addUsageAge(ages, "Captured locally", window.capturedAt, now);
       else ages.append(node("span", "", "Local capture time unknown"));
       if (timestamp(window.measuredAt) !== null) addUsageAge(ages, "Provider measurement", window.measuredAt, now);
@@ -1991,6 +2012,7 @@ function tick() {
   if (state.stream && lastStreamActivity !== null && now - lastStreamActivity >= CONNECTION_STALE_AFTER) recoverStream();
   renderConnection();
   renderPicker();
+  if (state.nextUsageReset !== null && now >= state.nextUsageReset) renderUsage(state.usage);
   for (const { field, label, value } of state.usageAges) field.textContent = `${label}: ${elapsedLabel(value, now)}`;
   paintUsageForecasts(now);
   if (!state.model) return;

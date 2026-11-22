@@ -232,9 +232,12 @@ def _bucket_windows(bucket, snapshots, now):
             readings = [(anchor_snapshot, anchor)]
             samples, _ = _samples([entry for entry in snapshots if entry["sourceId"] == anchor_snapshot["sourceId"]],
                                   anchor, now)
-        source, current = max(((snapshot["sourceId"], window) for snapshot, window in readings
-                               if _same_window(anchor, window)), key=_freshest)
-        yield source, _window_state(bucket, captured_at, current, samples, now)
+        source, current = max((reading for reading in readings if _same_window(anchor, reading[1])),
+                              key=_freshest)
+        signature = _window_signature(current)
+        last_capture = max(_date(entry["capturedAt"]) for entry, window in readings
+                           if _window_signature(window) == signature)
+        yield source["sourceId"], _window_state(bucket, _iso(last_capture), current, samples, now)
 
 
 def _window_state(bucket, captured_at, current, samples, now):
