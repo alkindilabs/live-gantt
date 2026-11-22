@@ -274,7 +274,7 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
   overflow-wrap: anywhere;
 }
 .critical-path-task:hover { background: transparent; text-decoration: underline; }
-.critical-path-meter {
+.critical-path-meter, .command-timing-meter {
   appearance: none;
   width: 100%;
   height: 5px;
@@ -282,11 +282,32 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
   border: 0;
   border-radius: 3px;
   background: var(--line);
-  accent-color: var(--critical);
+  accent-color: var(--meter-fill);
 }
-.critical-path-meter::-webkit-progress-bar { background: var(--line); }
-.critical-path-meter::-webkit-progress-value { background: var(--critical); }
-.critical-path-meter::-moz-progress-bar { background: var(--critical); }
+.critical-path-meter { --meter-fill: var(--critical); }
+:is(.critical-path-meter, .command-timing-meter)::-webkit-progress-bar { background: var(--line); }
+:is(.critical-path-meter, .command-timing-meter)::-webkit-progress-value { background: var(--meter-fill); }
+:is(.critical-path-meter, .command-timing-meter)::-moz-progress-bar { background: var(--meter-fill); }
+.command-timings {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.command-timings h2 { margin: 0; font-size: 13px; }
+.command-timings-coverage, .command-timings-scope, .command-timing-stats { margin: 0; color: var(--muted); font-size: 11px; }
+.command-timings-list { display: grid; gap: 10px; margin: 4px 0; padding: 0; list-style: none; }
+.command-timing { display: grid; gap: 2px; min-width: 0; }
+.command-timing-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 7px; }
+.command-timing-label { font: 600 12px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+.command-timing-total { flex: none; font-size: 12px; }
+.command-timing-meter { --meter-fill: var(--projected); }
+.command-timing:first-child .command-timing-meter { --meter-fill: var(--running); }
+.command-timing:first-child .command-timing-total { color: var(--running); }
+.command-timings-toggle { justify-self: start; min-height: 28px; padding: 3px 8px; font-size: 12px; }
 .finish-history {
   grid-column: 1 / -1;
   display: flex;
@@ -482,6 +503,15 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
 .task-main[aria-expanded=true] .task-title { color: var(--focus); }
 .task-label:has(.critical-path-highlight) { box-shadow: inset 3px 0 var(--critical); }
 .critical-path-marker { color: var(--critical); font-weight: 650; }
+.critical-path-details summary { width: fit-content; padding: 4px 0; color: var(--critical); font-size: 12px; cursor: pointer; }
+.critical-path-steps { margin: 4px 0 0; padding-inline-start: 23px; }
+.critical-path-step { padding: 3px 0 6px 2px; font-size: 12px; }
+.critical-path-step::marker { color: var(--muted); }
+.critical-path-step-task { display: block; min-height: 22px; font-size: 12px; font-weight: 500; }
+.critical-path-step-meta, .critical-path-step-marker { font-size: 11px; }
+.critical-path-step-meta { color: var(--muted); }
+.critical-path-step-marker { margin-inline-start: 6px; color: var(--critical); font-weight: 650; }
+.critical-path-step-largest .critical-path-step-task { font-weight: 650; }
 .detail-toggle { flex: 0 0 auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font-size: 10px; line-height: 15px; color: var(--muted); background: var(--surface-muted); }
 .detail-toggle[aria-expanded=true] { background: var(--surface-selected); border-color: var(--running); color: var(--focus); }
 .row-plot { position: relative; flex: 0 0 var(--plot-width); width: var(--plot-width); min-height: var(--row-height); border-bottom: 1px solid var(--grid); background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px); background-size: var(--tick-width) 100%; background-position-x: var(--tick-offset); overflow: visible; }

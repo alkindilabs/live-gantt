@@ -166,7 +166,7 @@ test("the largest critical-path task links to the inspector and updates with the
     projectedSegments: intervals.map(([start, end]) => ({ start: iso(start), end: iso(end) })),
     projectionAnchored: true,
   });
-  const preparation = task("1", "Preparation", [[0, 0.5]]);
+  const preparation = { ...task("4", "Preparation", [[0, 0.5]]), milestone: "Foundation" };
   const integration = {
     ...task("2", "Integration", [[0.5, 1], [3, 4]]),
     quotaDelays: [{ start: iso(1), end: iso(3), provider: "claude", reason: "predicted" }],
@@ -191,6 +191,22 @@ test("the largest critical-path task links to the inspector and updates with the
     await largest.getByText("Largest task on the critical path", { exact: true }).waitFor({ timeout: 5000 });
     const button = largest.getByRole("button", { name: "#2 Integration" });
     await largest.getByText("1.5 h of 4 h until expected finish (38%)", { exact: true }).waitFor();
+    const quotaSummary = page.getByText("2 h work · 2 h projected quota wait", { exact: true });
+    await quotaSummary.waitFor({ timeout: 5000 });
+    const disclosure = page.locator(".critical-path-details");
+    await disclosure.getByText("Critical path · 2 tasks", { exact: true }).click({ timeout: 5000 });
+    const steps = disclosure.getByRole("listitem");
+    assert.deepEqual(await steps.getByRole("button").allTextContents(), ["#4 Preparation", "#2 Integration"]);
+    await steps.nth(0).getByText("0.5 h work · Foundation", { exact: true }).waitFor();
+    await steps.nth(1).getByText("1.5 h work", { exact: true }).waitFor();
+    await steps.nth(1).getByText("2 h wait · Claude Code · Projected quota exhaustion", { exact: true }).waitFor({ timeout: 5000 });
+    await steps.nth(1).getByText("Largest task", { exact: true }).waitFor();
+    const preparationLink = steps.getByRole("button", { name: "#4 Preparation" });
+    await preparationLink.focus();
+    update({ progress: 40 });
+    await page.locator('progress[aria-label="Delivery progress"][value="40"]').waitFor();
+    assert.equal(await disclosure.getAttribute("open"), "");
+    assert.equal(await preparationLink.evaluate(element => element === document.activeElement), true);
     await button.click();
     assert.equal(await page.locator("#overview-toggle").getAttribute("aria-expanded"), "false");
     const inspector = page.locator("#details");
@@ -209,6 +225,7 @@ test("the largest critical-path task links to the inspector and updates with the
     update({ criticalPathTaskIds: [parallel.id], p50: iso(2) });
     const next = largest.getByRole("button", { name: "#3 Parallel work" });
     await next.waitFor();
+    assert.equal(await quotaSummary.count(), 0);
     assert.equal(await next.evaluate(element => element === document.activeElement), true);
     await largest.getByText("2 h of 2 h until expected finish (100%)", { exact: true }).waitFor();
     await next.click();
@@ -219,6 +236,63 @@ test("the largest critical-path task links to the inspector and updates with the
     await page.locator(".forecast-unavailable").waitFor({ state: "attached" });
     assert.equal(await largest.count(), 0);
     assert.equal(await page.locator(".critical-path-highlight").count(), 0);
+  } finally {
+    forecastSessions.delete(session);
+    await page.close();
+  }
+});
+
+test("command timings rank total elapsed time and retain disclosure after live updates", async () => {
+  const viewport = { width: 390, height: 844 };
+  const page = await browser.newPage({ viewport });
+  const session = "command-timings";
+  const { model } = fixture();
+  const operation = (label, calls, totalMs, longestMs) => ({ label, calls, totalMs, longestMs });
+  const operations = [
+    operation("Repeated checks", 10, 20_000, 3_000),
+    operation("One long build", 1, 15_000, 15_000),
+    operation("Read logs", 2, 8_000, 4_000),
+    operation("Find paths", 2, 2_000, 1_000),
+    operation("Read config", 1, 500, 500),
+  ];
+  const feed = { model: { ...model, id: session, tasks: [], milestones: [] } };
+  const update = commandTimings => {
+    feed.model.commandTimings = commandTimings;
+    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+  };
+  try {
+    forecastSessions.set(session, feed);
+    await page.goto(address.replace(SESSION_ID, session));
+    await openOverview(page, viewport);
+    await page.getByRole("heading", { name: "No planned tasks" }).waitFor();
+    const section = page.getByRole("region", { name: "Command hot path" });
+    assert.equal(await section.count(), 0);
+
+    update({ operations: [], unmeasured: 3 });
+    await section.getByText("0 measured · 3 unmeasured", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await section.getByRole("listitem").count(), 0);
+
+    update({ operations, unmeasured: 2 });
+    await section.getByText("16 measured · 2 unmeasured", { exact: true }).waitFor();
+    const rows = section.getByRole("listitem");
+    assert.equal(await rows.count(), 4);
+    assert.match(await rows.first().innerText(), /Repeated checks.*20 s total.*10 calls.*Average 2 s.*Longest 3 s/s);
+    assert.deepEqual(await rows.nth(1).locator("progress").evaluate(meter => [meter.value, meter.max]), [15_000, 20_000]);
+    const showAll = section.getByRole("button", { name: "Show all 5 operations" });
+    await showAll.click();
+    assert.equal(await rows.count(), 5);
+
+    const revised = [operation("One long build", 2, 123_000, 112_000), ...operations.filter(item => item.label !== "One long build")];
+    update({ operations: revised, unmeasured: 2 });
+    await rows.first().getByText("One long build", { exact: true }).waitFor();
+    assert.match(await rows.first().innerText(), /2 min 3 s total.*Longest 1 min 52 s/s);
+    const showFewer = section.getByRole("button", { name: "Show fewer operations" });
+    assert.equal(await showFewer.getAttribute("aria-expanded"), "true");
+    assert.equal(await showFewer.evaluate(button => button === document.activeElement), true);
+    assert.equal(await rows.count(), 5);
+    await showFewer.click();
+    assert.equal(await rows.count(), 4);
+    await assertFixedDocument(page, viewport);
   } finally {
     forecastSessions.delete(session);
     await page.close();
