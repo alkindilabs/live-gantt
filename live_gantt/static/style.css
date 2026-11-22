@@ -251,15 +251,18 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
 .forecast-remaining { color: var(--running); font-size: 11px; }
 .forecast-explanation { grid-column: 1 / -1; margin: 0; color: var(--warning); font-size: 12px; }
 .forecast-unavailable .forecast-time { color: var(--muted); }
-.critical-path {
+.critical-path, .milestone-quota-wait {
+  --path-accent: var(--critical);
   display: grid;
   gap: 5px;
   min-width: 0;
   padding: 8px 10px;
-  border-inline-start: 3px solid var(--critical);
+  border-inline-start: 3px solid var(--path-accent);
   border-radius: 4px;
-  background: color-mix(in srgb, var(--critical) 7%, var(--surface));
+  background: color-mix(in srgb, var(--path-accent) 7%, var(--surface));
 }
+.milestone-quota-wait { --path-accent: var(--warning); color: var(--path-accent); font-size: 13px; }
+.milestone-quota-wait + .critical-path { border-inline-start-color: var(--line); background: transparent; }
 .critical-path-label, .critical-path-share { color: var(--muted); font-size: 11px; }
 .critical-path-task {
   justify-self: start;
