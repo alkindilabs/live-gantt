@@ -33,6 +33,7 @@ async function main() {
   const streams = [];
   const requests = [];
   const timers = new Map();
+  const windowEvents = new Map();
   let nextTimer = 0;
   let firstDiscovery = true;
   let stateStatus = 503;
@@ -53,7 +54,7 @@ async function main() {
     emit(type, value) { this.listeners.get(type)({ data: JSON.stringify(value) }); }
   }
   const window = {
-    addEventListener() {},
+    addEventListener(type, listener) { windowEvents.set(type, listener); },
     setInterval() {},
     setTimeout(callback) { timers.set(++nextTimer, callback); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
@@ -94,6 +95,11 @@ async function main() {
   }
   assert.equal(location.hash, `#session=${encodedTarget}`, "Partial discovery must retain the requested session hash");
   assert.equal(streams.at(-1).url, `/events?list=${encodedTarget}`, "The requested session must be checked before choosing a fallback");
+  if (scenario === "hashchange") {
+    location.hash = "#session=another-unlisted-session";
+    windowEvents.get("hashchange")();
+    assert.equal(streams.at(-1).url, "/events?list=another-unlisted-session");
+  }
   if (scenario === "missing" || scenario === "invalid") {
     stateStatus = scenario === "missing" ? 404 : 400;
     const current = streams.at(-1);
@@ -146,6 +152,9 @@ class BrowserSessionTests(unittest.TestCase):
 
     def test_initial_partial_discovery_and_retry_preserve_session_link(self):
         self.run_scenario("startup")
+
+    def test_changed_session_link_opens_even_when_missing_from_discovery(self):
+        self.run_scenario("hashchange")
 
     def test_usage_stream_partial_discovery_preserves_session_link(self):
         self.run_scenario("stream")

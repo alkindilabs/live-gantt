@@ -246,7 +246,7 @@ function renderFacts(container, list, now) {
 }
 
 function renderPicker() {
-  const selected = state.lists.find(list => list.id === state.selected);
+  const selected = state.lists.find(list => list.id === state.selected) || state.model;
   elements.session.disabled = !state.lists.length;
   if (!selected) {
     elements["session-title"].textContent = state.lists.length ? "Choose a session" : "No sessions";
@@ -1552,7 +1552,7 @@ document.addEventListener("keydown", event => {
 });
 window.addEventListener("hashchange", () => {
   const id = linkedSession();
-  if (id && id !== state.selected && state.lists.some(list => list.id === id)) selectSession(id);
+  if (id && id !== state.selected) selectSession(id);
 });
 elements.follow.addEventListener("click", () => {
   state.follow = !state.follow;
