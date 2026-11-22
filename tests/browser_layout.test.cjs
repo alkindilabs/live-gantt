@@ -13,15 +13,18 @@ const OVERVIEW_DRAWER_BREAKPOINT = 1000;
 const MOBILE_POPOVER_MARGIN = 64;
 const MINIMUM_RAIL_CONTENT_WIDTH = 240;
 const GEOMETRY_TOLERANCE = 1;
+const LIVE_UPDATE_TIMEOUT = 5_000;
 const HOUR_MILLISECONDS = 60 * 60 * 1000;
 const DESKTOP_HEADER_HEIGHT_ALLOWANCE = 140;
 const NARROW_HEADER_HEIGHT_ALLOWANCE = 240;
 const TASK_COUNT = 60;
 const MILESTONE_COUNT = 12;
 const SCROLL_DISTANCE = 300;
+const MOBILE_VIEWPORT = { width: 390, height: 844 };
+const DESKTOP_VIEWPORT = { width: 1480, height: 760 };
 const VIEWPORTS = [
-  { width: 1480, height: 760 }, { width: 1480, height: 500 },
-  { width: 800, height: 700 }, { width: 390, height: 844 }, { width: 390, height: 500 },
+  DESKTOP_VIEWPORT, { width: 1480, height: 500 },
+  { width: 800, height: 700 }, MOBILE_VIEWPORT, { width: 390, height: 500 },
 ];
 const DISCLOSURES = [
   ["monitor", "#monitor-details"],
@@ -87,6 +90,10 @@ function fixture() {
   return { session, model, usage };
 }
 
+function writeState(response, model) {
+  response.write(`event: state\ndata: ${JSON.stringify(model)}\n\n`);
+}
+
 before(async () => {
   server = http.createServer(async (request, response) => {
     try {
@@ -100,7 +107,7 @@ before(async () => {
         response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
         const feed = forecastSessions.get(url.searchParams.get("list"));
         if (feed) feed.response = response;
-        response.write(`event: state\ndata: ${JSON.stringify(feed?.model || data.model)}\n\n`);
+        writeState(response, feed?.model || data.model);
         response.write(`event: usage\ndata: ${JSON.stringify(data.usage)}\n\n`);
       } else if (STATIC_ROUTES.has(pathname)) {
         const [filename, contentType] = STATIC_ROUTES.get(pathname);
@@ -153,7 +160,7 @@ async function assertFixedDocument(page, viewport) {
 }
 
 test("the largest critical-path task links to the inspector and updates with the forecast", async () => {
-  const viewport = { width: 390, height: 844 };
+  const viewport = MOBILE_VIEWPORT;
   const page = await browser.newPage({ viewport });
   const session = "critical-path";
   const base = Date.now();
@@ -181,27 +188,27 @@ test("the largest critical-path task links to the inspector and updates with the
   };
   const update = change => {
     feed.model.milestones = [{ ...milestone, ...change }];
-    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+    writeState(feed.response, feed.model);
   };
   try {
     forecastSessions.set(session, feed);
     await page.goto(address.replace(SESSION_ID, session));
     await openOverview(page, viewport);
     const largest = page.locator(".critical-path");
-    await largest.getByText("Largest task on the critical path", { exact: true }).waitFor({ timeout: 5000 });
+    await largest.getByText("Largest task on the critical path", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     const button = largest.getByRole("button", { name: "#2 Integration" });
     await largest.getByText("1.5 h of 4 h until expected finish (38%)", { exact: true }).waitFor();
     const quotaSummary = page.getByText("2 h work · 2 h projected quota wait", { exact: true });
-    await quotaSummary.waitFor({ timeout: 5000 });
+    await quotaSummary.waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     const majorityWait = page.locator(".milestone-quota-wait");
     assert.equal(await majorityWait.count(), 0, "Half the forecast does not constitute a majority");
     const disclosure = page.locator(".critical-path-details");
-    await disclosure.getByText("Critical path · 2 tasks", { exact: true }).click({ timeout: 5000 });
+    await disclosure.getByText("Critical path · 2 tasks", { exact: true }).click({ timeout: LIVE_UPDATE_TIMEOUT });
     const steps = disclosure.getByRole("listitem");
     assert.deepEqual(await steps.getByRole("button").allTextContents(), ["#4 Preparation", "#2 Integration"]);
     await steps.nth(0).getByText("0.5 h work · Foundation", { exact: true }).waitFor();
     await steps.nth(1).getByText("1.5 h work", { exact: true }).waitFor();
-    await steps.nth(1).getByText("2 h wait · Claude Code · Projected quota exhaustion", { exact: true }).waitFor({ timeout: 5000 });
+    await steps.nth(1).getByText("2 h wait · Claude Code · Projected quota exhaustion", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     await steps.nth(1).getByText("Largest task", { exact: true }).waitFor();
     const preparationLink = steps.getByRole("button", { name: "#4 Preparation" });
     await preparationLink.focus();
@@ -228,7 +235,7 @@ test("the largest critical-path task links to the inspector and updates with the
       quotaDelays: [{ start: iso(1), end: iso(4), provider: "claude", reason: "predicted" }],
     }, parallel];
     update({ p50: iso(5) });
-    await majorityWait.getByText("Quota wait accounts for 60% of time until expected finish", { exact: true }).waitFor({ timeout: 5000 });
+    await majorityWait.getByText("Quota wait accounts for 60% of time until expected finish", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     await majorityWait.getByText("2 h work · 3 h projected quota wait", { exact: true }).waitFor();
     await majorityWait.getByText("Claude Code · Projected quota exhaustion", { exact: true }).waitFor();
     assert.ok((await majorityWait.boundingBox()).y < (await largest.boundingBox()).y);
@@ -268,7 +275,7 @@ test("the largest critical-path task links to the inspector and updates with the
 });
 
 test("finish estimates show their own active work and projected quota wait on live updates", async () => {
-  const viewport = { width: 390, height: 844 };
+  const viewport = MOBILE_VIEWPORT;
   const page = await browser.newPage({ viewport });
   const session = "forecast-durations";
   const base = Date.now();
@@ -284,7 +291,7 @@ test("finish estimates show their own active work and projected quota wait on li
   const feed = { model: { ...model, id: session, observedAt: iso(0), milestones: [milestone] } };
   const update = change => {
     feed.model.milestones = [{ ...milestone, ...change }];
-    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+    writeState(feed.response, feed.model);
   };
   try {
     forecastSessions.set(session, feed);
@@ -294,7 +301,7 @@ test("finish estimates show their own active work and projected quota wait on li
     const later = page.locator(".later-finish");
     const expectedSplit = expected.getByRole("group", { name: "At last forecast" });
     const laterSplit = later.getByRole("group", { name: "At last forecast" });
-    await expectedSplit.getByText("2 h 30 min", { exact: true }).waitFor({ timeout: 5000 });
+    await expectedSplit.getByText("2 h 30 min", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     assert.equal(await expectedSplit.getByText("Active work", { exact: true }).isVisible(), true);
     assert.equal(await expectedSplit.getByText("Quota wait", { exact: true }).isVisible(), true);
     assert.equal(await expectedSplit.getByText("0 min", { exact: true }).isVisible(), true);
@@ -313,7 +320,7 @@ test("finish estimates show their own active work and projected quota wait on li
       p50: { workMs: 1, quotaWaitMs: 3.25 * HOUR_MILLISECONDS },
       p90: null,
     } });
-    await expectedSplit.getByText("3 h 15 min", { exact: true }).waitFor({ timeout: 5000 });
+    await expectedSplit.getByText("3 h 15 min", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     assert.equal(await expectedSplit.getByText("<1 min", { exact: true }).isVisible(), true);
     assert.equal(await later.getByText("Unavailable", { exact: true }).isVisible(), true);
     assert.equal(await laterSplit.count(), 0);
@@ -329,7 +336,7 @@ test("finish estimates show their own active work and projected quota wait on li
 });
 
 test("command timings rank total elapsed time and retain disclosure after live updates", async () => {
-  const viewport = { width: 390, height: 844 };
+  const viewport = MOBILE_VIEWPORT;
   const page = await browser.newPage({ viewport });
   const session = "command-timings";
   const { model } = fixture();
@@ -344,7 +351,7 @@ test("command timings rank total elapsed time and retain disclosure after live u
   const feed = { model: { ...model, id: session, tasks: [], milestones: [] } };
   const update = commandTimings => {
     feed.model.commandTimings = commandTimings;
-    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+    writeState(feed.response, feed.model);
   };
   try {
     forecastSessions.set(session, feed);
@@ -355,7 +362,7 @@ test("command timings rank total elapsed time and retain disclosure after live u
     assert.equal(await section.count(), 0);
 
     update({ operations: [], unmeasured: 3 });
-    await section.getByText("0 measured · 3 unmeasured", { exact: true }).waitFor({ timeout: 5000 });
+    await section.getByText("0 measured · 3 unmeasured", { exact: true }).waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
     assert.equal(await section.getByRole("listitem").count(), 0);
 
     update({ operations: [operation("Instant call", 1, 0, 0)], unmeasured: 2 });
@@ -393,8 +400,94 @@ test("command timings rank total elapsed time and retain disclosure after live u
   }
 });
 
+test("the leading command exposes observed costs and keeps its disclosure through live updates", async () => {
+  const viewport = MOBILE_VIEWPORT;
+  const page = await browser.newPage({ viewport });
+  const session = "command-diagnosis";
+  const { model } = fixture();
+  const first = { label: "git commit", calls: 7, totalMs: 20_000, longestMs: 8_000 };
+  const second = { label: "forge test", calls: 1, totalMs: 10_000, longestMs: 10_000 };
+  const detail = {
+    label: first.label,
+    slowestCalls: [
+      { elapsedMs: 8_000, outcome: "reviewRejected", reviewProvider: "claude" },
+      { elapsedMs: 4_000, outcome: "failed", reviewProvider: "codex" },
+      { elapsedMs: 3_000, outcome: "completed", reviewProvider: null },
+      { elapsedMs: 2_000, outcome: "denied", reviewProvider: null },
+      { elapsedMs: 2_000, outcome: "completed", reviewProvider: null },
+    ],
+    outcomes: [
+      { outcome: "reviewRejected", calls: 1, totalMs: 8_000 },
+      { outcome: "completed", calls: 4, totalMs: 6_000 },
+      { outcome: "failed", calls: 1, totalMs: 4_000 },
+      { outcome: "denied", calls: 1, totalMs: 2_000 },
+    ],
+    reviews: [
+      { provider: "claude", calls: 1, totalMs: 8_000, rejectedCalls: 1, rejectedMs: 8_000 },
+      { provider: "codex", calls: 1, totalMs: 4_000, rejectedCalls: 0, rejectedMs: 0 },
+      { provider: null, calls: 5, totalMs: 8_000, rejectedCalls: 0, rejectedMs: 0 },
+    ],
+    processTiming: { calls: 2, observedMs: 7_000, processMs: 3_000 },
+  };
+  const timings = { operations: [first, second], unmeasured: 2, leaderDetail: detail };
+  const feed = { model: { ...model, id: session, tasks: [], milestones: [], commandTimings: timings } };
+  function update(commandTimings) {
+    feed.model.commandTimings = commandTimings;
+    writeState(feed.response, feed.model);
+  }
+  try {
+    forecastSessions.set(session, feed);
+    await page.goto(address.replace(SESSION_ID, session));
+    await openOverview(page, viewport);
+    const section = page.getByRole("region", { name: "Command hot path" });
+    const disclosure = section.locator("details");
+    const summary = disclosure.locator("summary");
+    await summary.waitFor({ timeout: LIVE_UPDATE_TIMEOUT });
+    assert.equal(await disclosure.count(), 1);
+    assert.equal(await summary.innerText(), "Call breakdown · 3 unsuccessful calls · 14 s");
+    assert.equal(await disclosure.evaluate(details => details.open), false);
+    await summary.focus();
+    await summary.press("Enter");
+    await disclosure.getByText("Slowest 5 calls accounted for 95% of this operation’s time.").waitFor();
+    assert.equal(await disclosure.getByText("8 s · Review rejected · Claude Code review", { exact: true }).isVisible(), true);
+    assert.equal(await disclosure.getByText("2 of 7 calls · 7 s observed · 3 s process time · 4 s unattributed").isVisible(), true);
+    assert.equal(await disclosure.getByText("1 call · 8 s · 40%", { exact: true }).isVisible(), true);
+    assert.equal(await disclosure.getByText("No review reported", { exact: true }).isVisible(), true);
+    assert.equal(await disclosure.getByText(/Hook time was not recorded separately\./).isVisible(), true);
+    for (const layout of [viewport, DESKTOP_VIEWPORT]) {
+      await page.setViewportSize(layout);
+      assert.ok(await disclosure.evaluate((element, tolerance) =>
+        element.scrollWidth <= element.clientWidth + tolerance, GEOMETRY_TOLERANCE));
+      await assertFixedDocument(page, layout);
+    }
+
+    const replacement = {
+      label: second.label,
+      slowestCalls: [{ elapsedMs: 30_000, outcome: "unknown", reviewProvider: null }],
+      outcomes: [{ outcome: "unknown", calls: 1, totalMs: 30_000 }],
+      reviews: [], processTiming: null,
+    };
+    update({ ...timings, operations: [{ ...second, totalMs: 30_000, longestMs: 30_000 }, first], leaderDetail: replacement });
+    await disclosure.getByText("30 s · Unknown outcome", { exact: true }).waitFor();
+    assert.equal(await summary.evaluate(element => element === document.activeElement), true);
+    assert.equal(await disclosure.getByText(/process time|Hook time/).count(), 0);
+
+    update({ ...timings, operations: [{ ...second, totalMs: 31_000, longestMs: 31_000 }, first] });
+    await section.getByText("31 s total · 61%").waitFor();
+    assert.equal(await disclosure.count(), 0);
+    assert.equal(await section.locator("#command-timings-coverage").evaluate(element => element === document.activeElement), true);
+
+    update({ operations: [], unmeasured: 2 });
+    await section.getByText("0 measured · 2 unmeasured", { exact: true }).waitFor();
+    assert.equal(await disclosure.count(), 0);
+  } finally {
+    forecastSessions.delete(session);
+    await page.close();
+  }
+});
+
 test("quota readings show previous windows and last known usage until a live capture replaces them", async () => {
-  const viewport = { width: 390, height: 844 };
+  const viewport = MOBILE_VIEWPORT;
   const page = await browser.newPage({ viewport });
   const session = "quota-readings";
   const at = Date.now();
@@ -471,7 +564,7 @@ test("finish history keeps observed revisions, unknown estimates and completed m
       sync: { status: "current", checkedAt: observedAt },
       milestones: [{ name, progress: remaining ? 25 : 100, hasRemaining: remaining,
         hasEstimate: remaining, p50: finish === null ? null : new Date(finish).toISOString() }] };
-    feed.response?.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+    if (feed.response) writeState(feed.response, feed.model);
   }
   try {
     update(0, firstFinish);

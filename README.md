@@ -142,7 +142,7 @@ Running task bars end at now and have a patterned projection for the remaining e
 
 Milestones show weighted progress, **Expected finish**, **Later estimate** and time remaining. Expand **Critical path** to inspect the ordered tasks. The largest task’s share uses the full time until finish. Quota waits appear separately. **Needs estimates** means every remaining task lacks one. **Forecast unavailable** means the plan cannot produce a date. Completed milestones are grouped. Agent-only sessions show activity.
 
-**Command hot path** ranks session and subagent operations by their share of all measured call-to-result time. Parallel calls count separately. Counts, averages and longest calls show where repeated or slow work adds up.
+**Command hot path** ranks operations by total session and subagent call time, including overlaps. Expand the leader for slowest calls, outcomes and reported reviews. Review totals cover whole calls.
 
 The default timeline view is **12 h**, with now one quarter of the way across the visible chart. Use **12 h**, **3 days**, **Week** or **Fit**; the browser remembers your choice when local storage is available. **Fit** uses the overview rows and includes individual children only when expanded. The view follows now until you scroll horizontally; **Follow now** resumes it. **Status key** explains bar patterns without occupying the chart by default.
 
@@ -195,7 +195,7 @@ Each usage provider has `provider`, `status` (`available`, `stale` or `unavailab
 
 `projectedSegments` lists work intervals (`{start, end}`). `quotaDelays` lists pauses (`{start, end, provider, reason}`) classified as `reached` or `predicted`. `projectedStart` and `projectedEnd` enclose the forecast. `projectionAnchored`, milestone `p50Anchored` and `p90Anchored`, and root `quotaConstrained` identify quota effects. Milestone `criticalPathTaskIds` lists the expected-finish chain in prerequisite order, or an empty list when no work is attributable. Milestone `forecastDurations.p50` and `.p90` each give `{workMs, quotaWaitMs}` in milliseconds at `observedAt`, or `null` for a completed milestone, unavailable date or interval the scheduler cannot fully attribute.
 
-`commandTimings` reports `operations` with `label`, `calls`, `totalMs` and `longestMs`, ranked by cumulative observed time in milliseconds. `unmeasured` counts calls without attributable timings, including each opaque Codex tool wrapper once regardless of the commands inside. Labels omit arguments, paths and output.
+`commandTimings.operations` lists `label`, `calls`, `totalMs` and `longestMs`. `unmeasured` counts untimed calls and each opaque wrapper once. `leaderDetail` gives `slowestCalls`, `outcomes`, `reviews` and `processTiming`, or null for an empty ranking. Process time covers matched calls. Labels omit paths, arguments and output.
 
 `tokenUsage` contains `inputTokens`, `cachedInputTokens`, `cacheWriteTokens`, `outputTokens`, `reasoningOutputTokens` and `totalTokens`, each a nonnegative integer or `null`.
 

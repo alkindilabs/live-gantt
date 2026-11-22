@@ -3,6 +3,14 @@
 const PERCENT_SCALE = 100;
 const HALF_OF_FORECAST = 0.5;
 const COMMAND_TIMING_PREVIEW_COUNT = 4;
+const UNKNOWN_COMMAND_OUTCOME = { label: "Unknown outcome", unsuccessful: false };
+const COMMAND_OUTCOME_DISPLAY = new Map([
+  ["completed", { label: "Completed", unsuccessful: false }],
+  ["failed", { label: "Failed", unsuccessful: true }],
+  ["denied", { label: "Denied", unsuccessful: true }],
+  ["reviewRejected", { label: "Review rejected", unsuccessful: true }],
+  ["unknown", UNKNOWN_COMMAND_OUTCOME],
+]);
 const MINIMUM_DISPLAYED_COMMAND_PERCENT = 1;
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -45,6 +53,7 @@ const preciseDateFormat = new Intl.DateTimeFormat(undefined, { ...DATE_FORMAT_OP
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const commandDurationFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+const commandCountFormat = new Intl.NumberFormat();
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
 const SESSION_HASH_PREFIX = "#session=";
@@ -97,6 +106,7 @@ const elements = Object.fromEntries(
 const state = {
   model: null,
   commandTimingsExpanded: false,
+  commandLeaderExpanded: false,
   usage: null,
   nextUsageReset: null,
   usageAges: [],
@@ -280,8 +290,8 @@ function setNotice(message) {
   elements.notice.hidden = !message;
 }
 
-function plural(count, noun) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+function plural(count, noun, countLabel = count) {
+  return `${countLabel} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function elapsedLabel(value, now) {
@@ -606,7 +616,9 @@ function resetSession(id) {
   elements.overview.hidden = true;
   elements["session-tokens"].hidden = true;
   elements["command-timings"].hidden = true;
+  elements["command-timings-list"].replaceChildren();
   state.commandTimingsExpanded = false;
+  state.commandLeaderExpanded = false;
   renderFreshness(null);
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
@@ -884,20 +896,112 @@ function commandDuration(milliseconds) {
   return `${value} ${unit === SECOND ? "s" : "ms"}`;
 }
 
+function commandTimeShare(elapsedMs, totalMs) {
+  const share = elapsedMs / totalMs * PERCENT_SCALE;
+  return share > 0 && share < MINIMUM_DISPLAYED_COMMAND_PERCENT
+    ? `<${percent(MINIMUM_DISPLAYED_COMMAND_PERCENT)}` : percent(share);
+}
+
+function commandCallCount(calls, noun = "call") {
+  return plural(calls, noun, commandCountFormat.format(calls));
+}
+
+function renderCommandLeader(detail, operation) {
+  const { calls: totalCalls, totalMs } = operation;
+  const outcomeDisplay = outcome => COMMAND_OUTCOME_DISPLAY.get(outcome) ?? UNKNOWN_COMMAND_OUTCOME;
+  const unsuccessful = detail.outcomes.filter(group => outcomeDisplay(group.outcome).unsuccessful);
+  const unsuccessfulCalls = unsuccessful.reduce((sum, group) => sum + group.calls, 0);
+  const unsuccessfulMs = unsuccessful.reduce((sum, group) => sum + group.totalMs, 0);
+  const disclosure = node("details", "command-leader");
+  disclosure.open = state.commandLeaderExpanded;
+  const summary = node("summary", "", "Call breakdown");
+  if (unsuccessfulCalls) {
+    summary.append(` · ${commandCallCount(unsuccessfulCalls, "unsuccessful call")} · ${commandDuration(unsuccessfulMs)}`);
+  }
+  const content = node("div", "command-leader-content");
+  const outcomes = node("ul", "command-leader-list");
+  outcomes.setAttribute("role", "list");
+  for (const outcome of detail.outcomes) {
+    const share = totalMs > 0 ? ` · ${commandTimeShare(outcome.totalMs, totalMs)}` : "";
+    const row = node("li", "command-leader-outcome");
+    const facts = node("div", "command-leader-facts");
+    facts.append(node("span", "", outcomeDisplay(outcome.outcome).label),
+      node("strong", "", `${commandCallCount(outcome.calls)} · ${commandDuration(outcome.totalMs)}${share}`));
+    row.append(facts);
+    if (totalMs > 0) {
+      const meter = node("progress", "command-timing-meter command-leader-meter");
+      meter.max = totalMs;
+      meter.value = outcome.totalMs;
+      meter.setAttribute("aria-hidden", "true");
+      row.append(meter);
+    }
+    outcomes.append(row);
+  }
+  content.append(node("h3", "", "Time by outcome"), outcomes);
+
+  if (detail.slowestCalls.length) {
+    const slowestCount = detail.slowestCalls.length;
+    const slowestMs = detail.slowestCalls.reduce((sum, call) => sum + call.elapsedMs, 0);
+    const slowestLabel = slowestCount === 1 ? "Slowest call" : `Slowest ${commandCallCount(slowestCount)}`;
+    const slowest = node("ol", "command-leader-list command-leader-slowest");
+    slowest.setAttribute("role", "list");
+    for (const call of detail.slowestCalls) {
+      const reviewer = call.reviewProvider ? ` · ${providerName(call.reviewProvider)} review` : "";
+      slowest.append(node("li", "", `${commandDuration(call.elapsedMs)} · ${outcomeDisplay(call.outcome).label}${reviewer}`));
+    }
+    content.append(node("h3", "", "Slowest calls"));
+    if (totalMs > 0) {
+      content.append(node("p", "", `${slowestLabel} accounted for ${commandTimeShare(slowestMs, totalMs)} of this operation’s time.`));
+    }
+    content.append(slowest);
+  }
+
+  if (detail.reviews.length) {
+    const reviews = node("ul", "command-leader-list");
+    reviews.setAttribute("role", "list");
+    for (const review of detail.reviews) {
+      const label = review.provider ? providerName(review.provider) : "No review reported";
+      const rejected = review.rejectedCalls ? ` · ${commandCountFormat.format(review.rejectedCalls)} rejected (${commandDuration(review.rejectedMs)})` : "";
+      const row = node("li", "command-leader-facts");
+      row.append(node("span", "", label),
+        node("strong", "", `${commandCallCount(review.calls)} · ${commandDuration(review.totalMs)}${rejected}`));
+      reviews.append(row);
+    }
+    content.append(node("h3", "", "Review evidence"), reviews,
+      node("p", "", "These are whole-call durations. Hook time was not recorded separately."));
+  }
+
+  if (detail.processTiming) {
+    const { calls, observedMs, processMs } = detail.processTiming;
+    const unattributedMs = observedMs - processMs;
+    content.append(node("h3", "", "Reported process time"), node("p", "",
+      `${commandCountFormat.format(calls)} of ${commandCallCount(totalCalls)} · ${commandDuration(observedMs)} observed · ${commandDuration(processMs)} process time · ${commandDuration(unattributedMs)} unattributed`));
+  }
+
+  disclosure.append(summary, content);
+  return disclosure;
+}
+
 function renderCommandTimings() {
   const timings = state.model.commandTimings;
   const panel = elements["command-timings"];
+  const list = elements["command-timings-list"];
+  const previousLeader = list.querySelector(".command-leader");
+  const leaderFocused = previousLeader?.contains(document.activeElement);
+  if (previousLeader) state.commandLeaderExpanded = previousLeader.open;
   panel.hidden = !Array.isArray(timings?.operations);
-  if (panel.hidden) return;
-  const { operations, unmeasured } = timings;
+  if (panel.hidden) {
+    list.replaceChildren();
+    if (leaderFocused) elements["session-control"].focus({ preventScroll: true });
+    return;
+  }
+  const { operations, unmeasured, leaderDetail } = timings;
   elements["command-timings-wrappers"].hidden = state.model.provider !== "codex";
   const coverage = elements["command-timings-coverage"];
   const measured = operations.reduce((total, operation) => total + operation.calls, 0);
-  const counts = new Intl.NumberFormat();
   coverage.textContent = measured || unmeasured
-    ? `${counts.format(measured)} measured · ${counts.format(unmeasured)} unmeasured`
+    ? `${commandCountFormat.format(measured)} measured · ${commandCountFormat.format(unmeasured)} unmeasured`
     : "No command calls recorded.";
-  const list = elements["command-timings-list"];
   const toggle = elements["command-timings-toggle"];
   const measuredTime = operations.reduce((total, operation) => total + operation.totalMs, 0);
   const basis = elements["command-timings-basis"];
@@ -906,33 +1010,35 @@ function renderCommandTimings() {
   list.replaceChildren();
   list.hidden = !operations.length;
   const visibleOperations = state.commandTimingsExpanded ? operations : operations.slice(0, COMMAND_TIMING_PREVIEW_COUNT);
-  for (const { label, calls, totalMs, longestMs } of visibleOperations) {
+  let leaderDisclosure;
+  for (const operation of visibleOperations) {
+    const { label, calls, totalMs, longestMs } = operation;
     const row = node("li", "command-timing");
     const heading = node("div", "command-timing-heading");
     const total = node("strong", "command-timing-total", `${commandDuration(totalMs)} total`);
-    if (measuredTime > 0) {
-      const share = totalMs / measuredTime * PERCENT_SCALE;
-      const shareLabel = share > 0 && share < MINIMUM_DISPLAYED_COMMAND_PERCENT
-        ? `<${percent(MINIMUM_DISPLAYED_COMMAND_PERCENT)}` : percent(share);
-      total.append(` · ${shareLabel}`);
-    }
+    if (measuredTime > 0) total.append(` · ${commandTimeShare(totalMs, measuredTime)}`);
     heading.append(node("span", "command-timing-label", label), total);
     const meter = node("progress", "command-timing-meter");
     if (measuredTime > 0) meter.max = measuredTime;
     meter.value = totalMs;
     meter.setAttribute("aria-hidden", "true");
     const stats = node("span", "command-timing-stats",
-      `${counts.format(calls)} ${calls === 1 ? "call" : "calls"} · Average ${commandDuration(totalMs / calls)} · Longest ${commandDuration(longestMs)}`);
+      `${commandCallCount(calls)} · Average ${commandDuration(totalMs / calls)} · Longest ${commandDuration(longestMs)}`);
     row.append(heading, meter, stats);
+    if (operation === operations[0] && label === leaderDetail?.label) {
+      leaderDisclosure = renderCommandLeader(leaderDetail, operation);
+      row.append(leaderDisclosure);
+    }
     list.append(row);
   }
+  if (leaderFocused) (leaderDisclosure?.querySelector("summary") || coverage).focus({ preventScroll: true });
   if (operations.length <= COMMAND_TIMING_PREVIEW_COUNT && document.activeElement === toggle) {
     coverage.focus({ preventScroll: true });
   }
   toggle.hidden = operations.length <= COMMAND_TIMING_PREVIEW_COUNT;
   toggle.setAttribute("aria-expanded", String(state.commandTimingsExpanded));
   toggle.textContent = state.commandTimingsExpanded
-    ? "Show fewer operations" : `Show all ${counts.format(operations.length)} operations`;
+    ? "Show fewer operations" : `Show all ${commandCountFormat.format(operations.length)} operations`;
 }
 
 function fitRange(now) {
