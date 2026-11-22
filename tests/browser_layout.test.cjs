@@ -272,12 +272,18 @@ test("command timings rank total elapsed time and retain disclosure after live u
     await section.getByText("0 measured · 3 unmeasured", { exact: true }).waitFor({ timeout: 5000 });
     assert.equal(await section.getByRole("listitem").count(), 0);
 
+    update({ operations: [operation("Instant call", 1, 0, 0)], unmeasured: 2 });
+    await section.getByText("Instant call", { exact: true }).waitFor();
+    assert.doesNotMatch(await section.innerText(), /%|Share of/);
+
     update({ operations, unmeasured: 2 });
     await section.getByText("16 measured · 2 unmeasured", { exact: true }).waitFor();
     const rows = section.getByRole("listitem");
     assert.equal(await rows.count(), 4);
     assert.match(await rows.first().innerText(), /Repeated checks.*20 s total.*10 calls.*Average 2 s.*Longest 3 s/s);
-    assert.deepEqual(await rows.nth(1).locator("progress").evaluate(meter => [meter.value, meter.max]), [15_000, 20_000]);
+    assert.match(await rows.nth(1).innerText(), /15 s total · 33%/);
+    assert.deepEqual(await rows.nth(1).locator("progress").evaluate(meter => [meter.value, meter.max]), [15_000, 45_500]);
+    assert.equal(await section.getByText("Share of 45.5 s measured command time", { exact: true }).isVisible(), true);
     const showAll = section.getByRole("button", { name: "Show all 5 operations" });
     await showAll.click();
     assert.equal(await rows.count(), 5);
@@ -286,6 +292,8 @@ test("command timings rank total elapsed time and retain disclosure after live u
     update({ operations: revised, unmeasured: 2 });
     await rows.first().getByText("One long build", { exact: true }).waitFor();
     assert.match(await rows.first().innerText(), /2 min 3 s total.*Longest 1 min 52 s/s);
+    assert.match(await rows.first().innerText(), /2 min 3 s total · 80%/);
+    assert.match(await rows.last().innerText(), /500 ms total · <1%/);
     const showFewer = section.getByRole("button", { name: "Show fewer operations" });
     assert.equal(await showFewer.getAttribute("aria-expanded"), "true");
     assert.equal(await showFewer.evaluate(button => button === document.activeElement), true);
