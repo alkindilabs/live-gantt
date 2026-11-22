@@ -77,6 +77,14 @@
             </div>
             <div id="milestones" class="milestones" aria-label="Milestone progress and finish estimates"></div>
           </section>
+          <section id="command-timings" class="command-timings" aria-labelledby="command-timings-title" hidden>
+            <h2 id="command-timings-title">Command hot path</h2>
+            <p id="command-timings-coverage" class="command-timings-coverage" tabindex="-1"></p>
+            <ol id="command-timings-list" class="command-timings-list" aria-label="Operations by total elapsed time"></ol>
+            <button id="command-timings-toggle" class="command-timings-toggle" type="button" aria-expanded="false" aria-controls="command-timings-list" hidden></button>
+            <p class="command-timings-scope">Includes this session and its subagents. Calls can overlap.</p>
+            <p class="command-timings-scope">Background, unidentified, or unfinished calls are unmeasured. <span id="command-timings-wrappers" hidden>Each opaque Codex tool call also counts once, even if it contains zero or several commands.</span></p>
+          </section>
           <section id="session-tokens" class="session-tokens" aria-labelledby="tokens-title" hidden>
             <div class="tokens-heading"><h2 id="tokens-title">Session tokens</h2></div>
             <dl id="token-values" class="token-values"></dl>

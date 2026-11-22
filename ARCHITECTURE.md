@@ -76,7 +76,7 @@ Read-only routes expose lists, selected state, quota and the running release. Ev
 
 ## Browser and process lifecycle
 
-[The browser](live_gantt/static/app.js) keeps account usage independent of selection. Timeline, inspector and sidebar scroll independently. Narrow screens switch between sidebar and timeline. The server owns staleness, pace and forecasts. The browser highlights the largest task on each critical path by projected work time. Its share uses the time from observation to P50, including waits. Successful snapshots supply bounded milestone P50 history. Web Locks serialize storage writes across tabs. Unavailable storage leaves history in the viewing tab.
+[The browser](live_gantt/static/app.js) keeps account usage independent of selection. Timeline, inspector and sidebar scroll independently, with a switch on narrow screens. The server owns forecasts and staleness. The critical path shows ordered prerequisites and its largest task by remaining work, as a share of time from observation to expected finish. The command hot path ranks observed time by operation. Bounded milestone P50 history uses successful snapshots and Web Locks across tabs, with tab-local fallback.
 
 The picker lists recent chartable work and selection; search reaches older work. `#session=<id>` survives reloads and discovery failures through direct checks; partial listings cannot replace it. One stream serves session or quota views. Hiding closes it; resuming gets a full snapshot. Only confirmed removal clears selection.
 

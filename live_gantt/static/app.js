@@ -1,6 +1,7 @@
 "use strict";
 
 const PERCENT_SCALE = 100;
+const COMMAND_TIMING_PREVIEW_COUNT = 4;
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
@@ -41,6 +42,7 @@ const dateFormat = new Intl.DateTimeFormat(undefined, DATE_FORMAT_OPTIONS);
 const preciseDateFormat = new Intl.DateTimeFormat(undefined, { ...DATE_FORMAT_OPTIONS, second: "2-digit" });
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const commandDurationFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
 const SESSION_HASH_PREFIX = "#session=";
@@ -88,10 +90,11 @@ function savedFinishHistory() {
 }
 
 const elements = Object.fromEntries(
-  ["version", "overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["version", "overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "command-timings", "command-timings-coverage", "command-timings-list", "command-timings-toggle", "command-timings-wrappers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
+  commandTimingsExpanded: false,
   usage: null,
   usageAges: [],
   usageForecasts: [],
@@ -255,10 +258,13 @@ function currentQuotaDelay(task, now) {
     delay.start <= now && (delay.end === null || now < delay.end));
 }
 
+function quotaDelayReason(reason) {
+  return reason === "predicted" ? "Projected quota exhaustion" : "Quota limit reached";
+}
+
 function quotaDelayDescription(delay) {
-  const reason = delay.reason === "predicted" ? "Projected quota exhaustion" : "Quota limit reached";
   const resume = delay.end === null ? "Resume time unavailable" : `Resume ${dateTime(delay.end)}`;
-  return `${providerName(delay.provider)} · ${resume} · ${reason}`;
+  return `${providerName(delay.provider)} · ${resume} · ${quotaDelayReason(delay.reason)}`;
 }
 
 function taskDescription(task, now = Date.now()) {
@@ -596,6 +602,8 @@ function resetSession(id) {
   elements.milestones.replaceChildren();
   elements.overview.hidden = true;
   elements["session-tokens"].hidden = true;
+  elements["command-timings"].hidden = true;
+  state.commandTimingsExpanded = false;
   renderFreshness(null);
   elements.warnings.hidden = true;
   elements["task-count"].textContent = "";
@@ -839,6 +847,60 @@ function renderTokens() {
     elements["token-values"].append(field);
   }
   elements["session-tokens"].hidden = false;
+}
+
+function commandDuration(milliseconds) {
+  if (milliseconds >= HOUR) return duration(milliseconds);
+  if (milliseconds >= MINUTE) {
+    const minutes = Math.floor(milliseconds / MINUTE);
+    const seconds = Math.floor(milliseconds % MINUTE / SECOND);
+    return `${minutes} min ${seconds} s`;
+  }
+  const unit = milliseconds >= SECOND ? SECOND : 1;
+  const value = commandDurationFormat.format(milliseconds / unit);
+  return `${value} ${unit === SECOND ? "s" : "ms"}`;
+}
+
+function renderCommandTimings() {
+  const timings = state.model.commandTimings;
+  const panel = elements["command-timings"];
+  panel.hidden = !Array.isArray(timings?.operations);
+  if (panel.hidden) return;
+  const { operations, unmeasured } = timings;
+  elements["command-timings-wrappers"].hidden = state.model.provider !== "codex";
+  const coverage = elements["command-timings-coverage"];
+  const measured = operations.reduce((total, operation) => total + operation.calls, 0);
+  const counts = new Intl.NumberFormat();
+  coverage.textContent = measured || unmeasured
+    ? `${counts.format(measured)} measured · ${counts.format(unmeasured)} unmeasured`
+    : "No command calls recorded.";
+  const list = elements["command-timings-list"];
+  const toggle = elements["command-timings-toggle"];
+  const maxTotal = operations[0]?.totalMs ?? 0;
+  list.replaceChildren();
+  list.hidden = !operations.length;
+  const visibleOperations = state.commandTimingsExpanded ? operations : operations.slice(0, COMMAND_TIMING_PREVIEW_COUNT);
+  for (const { label, calls, totalMs, longestMs } of visibleOperations) {
+    const row = node("li", "command-timing");
+    const heading = node("div", "command-timing-heading");
+    heading.append(node("span", "command-timing-label", label),
+      node("strong", "command-timing-total", `${commandDuration(totalMs)} total`));
+    const meter = node("progress", "command-timing-meter");
+    if (maxTotal > 0) meter.max = maxTotal;
+    meter.value = totalMs;
+    meter.setAttribute("aria-hidden", "true");
+    const stats = node("span", "command-timing-stats",
+      `${counts.format(calls)} ${calls === 1 ? "call" : "calls"} · Average ${commandDuration(totalMs / calls)} · Longest ${commandDuration(longestMs)}`);
+    row.append(heading, meter, stats);
+    list.append(row);
+  }
+  if (operations.length <= COMMAND_TIMING_PREVIEW_COUNT && document.activeElement === toggle) {
+    coverage.focus({ preventScroll: true });
+  }
+  toggle.hidden = operations.length <= COMMAND_TIMING_PREVIEW_COUNT;
+  toggle.setAttribute("aria-expanded", String(state.commandTimingsExpanded));
+  toggle.textContent = state.commandTimingsExpanded
+    ? "Show fewer operations" : `Show all ${counts.format(operations.length)} operations`;
 }
 
 function fitRange(now) {
@@ -1571,26 +1633,24 @@ function inspectAtPointer(event) {
 finish.plot.addEventListener("pointerdown", inspectAtPointer);
 finish.plot.addEventListener("pointermove", inspectAtPointer);
 
-function largestCriticalPathTask(milestone, tasks, observedAt) {
-  const finish = timestamp(milestone.p50);
-  const path = milestone.criticalPathTaskIds;
-  if (observedAt === null || finish === null || finish <= observedAt || !Array.isArray(path)) return null;
-  let largest = null;
-  for (const id of path) {
+function criticalPathSteps(milestone, tasks, observedAt, finishTime) {
+  const withinForecast = ({ start, end }) => end === null ? 0
+    : Math.max(0, Math.min(end, finishTime) - Math.max(start, observedAt));
+  const steps = [];
+  for (const id of milestone.criticalPathTaskIds) {
     const task = tasks.get(id);
     if (!task || task.status === "completed") continue;
-    const work = taskSegments(task, observedAt).reduce((total, segment) => total + segment.end - segment.start, 0);
-    if (work > (largest?.work ?? 0)) largest = { task, work };
+    const work = taskSegments(task, observedAt).reduce((total, segment) => total + withinForecast(segment), 0);
+    const waits = taskQuotaDelays(task).map(delay => ({ ...delay, duration: withinForecast(delay) }))
+      .filter(delay => delay.duration > 0);
+    steps.push({ task, work, waits });
   }
-  return largest && { ...largest, timeUntilFinish: finish - observedAt };
+  return steps;
 }
 
-function renderCriticalPath(milestone, contribution) {
-  const { task, work, timeUntilFinish } = contribution;
-  const share = work / timeUntilFinish * PERCENT_SCALE;
-  const panel = node("div", "critical-path");
-  const label = node("span", "critical-path-label", "Largest task on the critical path");
+function criticalTaskButton(milestone, task, className = "") {
   const button = node("button", "critical-path-task", `#${task.id} ${task.subject || "Untitled task"}`);
+  if (className) button.classList.add(className);
   button.type = "button";
   button.dataset.criticalMilestone = milestone.name;
   button.addEventListener("click", () => {
@@ -1599,6 +1659,15 @@ function renderCriticalPath(milestone, contribution) {
     state.detailEntries.get(key)?.target.click();
     state.focusTargets.get(key)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
+  return button;
+}
+
+function renderCriticalPath(milestone, contribution, timeUntilFinish) {
+  const { task, work } = contribution;
+  const share = work / timeUntilFinish * PERCENT_SCALE;
+  const panel = node("div", "critical-path");
+  const label = node("span", "critical-path-label", "Largest task on the critical path");
+  const button = criticalTaskButton(milestone, task);
   const value = node("span", "critical-path-share",
     `${hours(work / HOUR)} of ${hours(timeUntilFinish / HOUR)} until expected finish (${percent(share)})`);
   value.title = "Projected work excludes quota pauses. The share uses the forecast snapshot.";
@@ -1610,9 +1679,43 @@ function renderCriticalPath(milestone, contribution) {
   return { panel, button };
 }
 
+function renderCriticalPathDetails(milestone, steps, largest, open, focusedTask) {
+  const details = node("details", "critical-path-details");
+  details.dataset.criticalMilestone = milestone.name;
+  details.open = open;
+  const summary = node("summary", "", `Critical path · ${plural(steps.length, "task")}`);
+  summary.dataset.criticalMilestone = milestone.name;
+  const list = node("ol", "critical-path-steps");
+  let focus = summary;
+  for (const step of steps) {
+    const { task, work, waits } = step;
+    const item = node("li", "critical-path-step");
+    const button = criticalTaskButton(milestone, task, "critical-path-step-task");
+    button.dataset.criticalTask = task.id;
+    if (task.id === focusedTask) focus = button;
+    const otherMilestone = task.milestone && task.milestone !== milestone.name ? ` · ${task.milestone}` : "";
+    const meta = node("span", "critical-path-step-meta", `${hours(work / HOUR)} work${otherMilestone}`);
+    item.append(button, meta);
+    if (step === largest) {
+      item.classList.add("critical-path-step-largest");
+      item.append(node("span", "critical-path-step-marker", "Largest task"));
+    }
+    for (const delay of waits) {
+      item.append(node("div", "critical-path-step-meta",
+        `${hours(delay.duration / HOUR)} wait · ${providerName(delay.provider)} · ${quotaDelayReason(delay.reason)}`));
+    }
+    list.append(item);
+  }
+  details.append(summary, list);
+  return { details, focus };
+}
+
 function renderMilestones(now) {
   const focused = document.activeElement?.closest(".finish-history");
-  const focusedCriticalMilestone = document.activeElement?.dataset.criticalMilestone;
+  const criticalControl = document.activeElement;
+  const focusedCriticalMilestone = criticalControl?.dataset.criticalMilestone;
+  const openCriticalPaths = new Set([...elements.milestones.querySelectorAll(".critical-path-details[open]")]
+    .map(details => details.dataset.criticalMilestone));
   let criticalFocus = null;
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
@@ -1661,15 +1764,33 @@ function renderMilestones(now) {
         : "Needs estimates. Ask your coding agent to estimate the remaining tasks."));
     }
     const historyButton = finishButton(name);
-    const contribution = largestCriticalPathTask(milestone, tasks, observedAt);
+    const finishTime = timestamp(milestone.p50);
+    const timeUntilFinish = finishTime !== null && observedAt !== null ? finishTime - observedAt : 0;
+    const steps = timeUntilFinish > 0 && Array.isArray(milestone.criticalPathTaskIds)
+      ? criticalPathSteps(milestone, tasks, observedAt, finishTime) : [];
+    const contribution = steps.reduce((largest, step) => step.work > (largest?.work ?? 0) ? step : largest, null);
+    const keepFocus = name === focusedCriticalMilestone;
+    if (keepFocus) criticalFocus = historyButton;
     if (contribution) {
       const id = contribution.task.id;
       if (!state.criticalPathHighlights.has(id)) state.criticalPathHighlights.set(id, []);
       state.criticalPathHighlights.get(id).push(name);
-      const { panel, button } = renderCriticalPath(milestone, contribution);
+      const { panel, button } = renderCriticalPath(milestone, contribution, timeUntilFinish);
       card.append(panel);
-      if (name === focusedCriticalMilestone) criticalFocus = button;
-    } else if (name === focusedCriticalMilestone) criticalFocus = historyButton;
+      if (keepFocus) criticalFocus = button;
+    }
+    if (steps.length) {
+      const quotaWait = steps.flatMap(step => step.waits).reduce((total, delay) => total + delay.duration, 0);
+      if (quotaWait > 0) {
+        const totalWork = steps.reduce((total, step) => total + step.work, 0);
+        card.append(node("div", "critical-path-share",
+          `${hours(totalWork / HOUR)} work · ${hours(quotaWait / HOUR)} projected quota wait`));
+      }
+      const { details, focus } = renderCriticalPathDetails(milestone, steps, contribution,
+        openCriticalPaths.has(name), keepFocus ? criticalControl.dataset.criticalTask : undefined);
+      card.append(details);
+      if (keepFocus && criticalControl.closest(".critical-path-details")) criticalFocus = focus;
+    }
     card.append(historyButton);
     cards.append(card);
   }
@@ -1818,6 +1939,7 @@ function renderModel() {
   elements["session-heading"].hidden = false;
   elements["session-provider"].textContent = providerName(model.provider);
   renderTokens();
+  renderCommandTimings();
   elements["session-name"].textContent = shortProject(model.project) || model.title || "Session";
   elements["session-description"].textContent = model.title || "";
   elements["session-description"].hidden = !model.title || model.title === shortProject(model.project);
@@ -1859,6 +1981,11 @@ function setOverviewOpen(open) {
   if (open) panel.focus({ preventScroll: true });
   else if (panel.contains(document.activeElement)) toggle.focus({ preventScroll: true });
 }
+
+elements["command-timings-toggle"].addEventListener("click", () => {
+  state.commandTimingsExpanded = !state.commandTimingsExpanded;
+  renderCommandTimings();
+});
 
 elements["overview-toggle"].addEventListener("click", () => {
   setOverviewOpen(elements["overview-toggle"].getAttribute("aria-expanded") !== "true");
