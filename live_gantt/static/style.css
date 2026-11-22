@@ -324,6 +324,25 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
 .command-timing:first-child .command-timing-meter { --meter-fill: var(--running); }
 .command-timing:first-child .command-timing-total { color: var(--running); }
 .command-timings-toggle { justify-self: start; min-height: 28px; padding: 3px 8px; font-size: 12px; }
+.command-leader {
+  min-width: 0;
+  margin-top: 3px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  overflow-wrap: anywhere;
+}
+.command-leader summary { padding: 6px 0; color: var(--focus); font-size: 12px; cursor: pointer; }
+.command-leader-content { display: grid; gap: 5px; padding: 0 0 8px; font-size: 11px; }
+.command-leader-content h3 { margin: 5px 0 0; font-size: 11px; }
+.command-leader-content p { margin: 0; color: var(--muted); }
+.command-leader-list { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.command-leader-facts { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; }
+.command-leader-facts strong { font-variant-numeric: tabular-nums; }
+.command-leader-outcome { display: grid; }
+.command-leader-slowest { padding-inline-start: 18px; list-style: decimal; }
+.command-timing:first-child .command-leader-meter { --meter-fill: var(--projected); }
 .finish-history {
   grid-column: 1 / -1;
   display: flex;
