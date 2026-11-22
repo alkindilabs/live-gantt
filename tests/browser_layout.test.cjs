@@ -193,6 +193,8 @@ test("the largest critical-path task links to the inspector and updates with the
     await largest.getByText("1.5 h of 4 h until expected finish (38%)", { exact: true }).waitFor();
     const quotaSummary = page.getByText("2 h work · 2 h projected quota wait", { exact: true });
     await quotaSummary.waitFor({ timeout: 5000 });
+    const majorityWait = page.locator(".milestone-quota-wait");
+    assert.equal(await majorityWait.count(), 0, "Half the forecast does not constitute a majority");
     const disclosure = page.locator(".critical-path-details");
     await disclosure.getByText("Critical path · 2 tasks", { exact: true }).click({ timeout: 5000 });
     const steps = disclosure.getByRole("listitem");
@@ -221,11 +223,24 @@ test("the largest critical-path task links to the inspector and updates with the
     assert.equal(await page.locator(".task-main.critical-path-highlight").count(), 1);
 
     await openOverview(page, viewport);
+    feed.model.tasks = [preparation, {
+      ...task("2", "Integration", [[0.5, 1], [4, 5]]),
+      quotaDelays: [{ start: iso(1), end: iso(4), provider: "claude", reason: "predicted" }],
+    }, parallel];
+    update({ p50: iso(5) });
+    await majorityWait.getByText("Quota wait accounts for 60% of time until expected finish", { exact: true }).waitFor({ timeout: 5000 });
+    await majorityWait.getByText("2 h work · 3 h projected quota wait", { exact: true }).waitFor();
+    await majorityWait.getByText("Claude Code · Projected quota exhaustion", { exact: true }).waitFor();
+    assert.ok((await majorityWait.boundingBox()).y < (await largest.boundingBox()).y);
+    feed.model.tasks[1].quotaDelays[0].reason = "reached";
+    update({ p50: iso(5) });
+    await majorityWait.getByText("Claude Code · Quota limit reached", { exact: true }).waitFor();
     await button.focus();
     update({ criticalPathTaskIds: [parallel.id], p50: iso(2) });
     const next = largest.getByRole("button", { name: "#3 Parallel work" });
     await next.waitFor();
     assert.equal(await quotaSummary.count(), 0);
+    assert.equal(await majorityWait.count(), 0);
     assert.equal(await next.evaluate(element => element === document.activeElement), true);
     await largest.getByText("2 h of 2 h until expected finish (100%)", { exact: true }).waitFor();
     await next.click();

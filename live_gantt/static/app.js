@@ -1,6 +1,7 @@
 "use strict";
 
 const PERCENT_SCALE = 100;
+const HALF_OF_FORECAST = 0.5;
 const COMMAND_TIMING_PREVIEW_COUNT = 4;
 const MINIMUM_DISPLAYED_COMMAND_PERCENT = 1;
 const SECOND = 1000;
@@ -1651,7 +1652,10 @@ function criticalPathSteps(milestone, tasks, observedAt, finishTime) {
     const task = tasks.get(id);
     if (!task || task.status === "completed") continue;
     const work = taskSegments(task, observedAt).reduce((total, segment) => total + withinForecast(segment), 0);
-    const waits = taskQuotaDelays(task).map(delay => ({ ...delay, duration: withinForecast(delay) }))
+    const waits = taskQuotaDelays(task).map(delay => ({
+      duration: withinForecast(delay),
+      source: `${providerName(delay.provider)} · ${quotaDelayReason(delay.reason)}`,
+    }))
       .filter(delay => delay.duration > 0);
     steps.push({ task, work, waits });
   }
@@ -1712,7 +1716,7 @@ function renderCriticalPathDetails(milestone, steps, largest, open, focusedTask)
     }
     for (const delay of waits) {
       item.append(node("div", "critical-path-step-meta",
-        `${hours(delay.duration / HOUR)} wait · ${providerName(delay.provider)} · ${quotaDelayReason(delay.reason)}`));
+        `${hours(delay.duration / HOUR)} wait · ${delay.source}`));
     }
     list.append(item);
   }
@@ -1790,11 +1794,23 @@ function renderMilestones(now) {
       if (keepFocus) criticalFocus = button;
     }
     if (steps.length) {
-      const quotaWait = steps.flatMap(step => step.waits).reduce((total, delay) => total + delay.duration, 0);
+      const waits = steps.flatMap(step => step.waits);
+      const quotaWait = waits.reduce((total, delay) => total + delay.duration, 0);
       if (quotaWait > 0) {
         const totalWork = steps.reduce((total, step) => total + step.work, 0);
-        card.append(node("div", "critical-path-share",
-          `${hours(totalWork / HOUR)} work · ${hours(quotaWait / HOUR)} projected quota wait`));
+        const breakdown = node("div", "critical-path-share",
+          `${hours(totalWork / HOUR)} work · ${hours(quotaWait / HOUR)} projected quota wait`);
+        const waitShare = quotaWait / timeUntilFinish;
+        if (waitShare > HALF_OF_FORECAST) {
+          const panel = node("div", "milestone-quota-wait");
+          panel.append(node("strong", "", `Quota wait accounts for ${percent(waitShare * PERCENT_SCALE)} of time until expected finish`), breakdown);
+          for (const source of new Set(waits.map(delay => delay.source))) {
+            panel.append(node("span", "critical-path-share", source));
+          }
+          measures.after(panel);
+        } else {
+          card.append(breakdown);
+        }
       }
       const { details, focus } = renderCriticalPathDetails(milestone, steps, contribution,
         openCriticalPaths.has(name), keepFocus ? criticalControl.dataset.criticalTask : undefined);
