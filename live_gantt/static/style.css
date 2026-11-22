@@ -250,6 +250,18 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
 .forecast-time { color: var(--text); font-size: 13px; line-height: 1.25; font-weight: 600; }
 .later-finish .forecast-time { color: var(--muted); }
 .forecast-remaining { color: var(--running); font-size: 11px; }
+.milestone-date:has(.forecast-breakdown) { grid-template-rows: auto auto minmax(1.3em, auto) auto; font-size: 11px; }
+.forecast-breakdown { grid-row: 4; min-width: 0; margin: 3px 0 0; padding: 0; border: 0; }
+.forecast-breakdown legend { padding: 0; color: var(--muted); }
+.forecast-composition { display: flex; height: 5px; margin: 3px 0 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
+.forecast-work { --segment-fill: var(--running); }
+.forecast-wait { --segment-fill: repeating-linear-gradient(135deg, var(--warning) 0 2px, var(--overrun-fill) 2px 4px); }
+.forecast-composition > span { flex-basis: 0; min-width: 1px; background: var(--segment-fill); }
+.forecast-durations { display: grid; gap: 2px; margin: 0; }
+.forecast-durations > div { display: flex; flex-wrap: wrap; justify-content: space-between; column-gap: 4px; }
+.forecast-durations dt { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.forecast-durations dt::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--segment-fill); }
+.forecast-durations dd { margin: 0; font-weight: 600; }
 .forecast-explanation { grid-column: 1 / -1; margin: 0; color: var(--warning); font-size: 12px; }
 .forecast-unavailable .forecast-time { color: var(--muted); }
 .critical-path, .milestone-quota-wait {
