@@ -27,7 +27,7 @@
   --stale: #a64135;
   --stale-fill: #fff0eb;
   --shadow: 0 12px 36px #22324824;
-  --label-width: 320px;
+  --label-width: 360px;
   --plot-width: 800px;
   --row-height: 29px;
   --bar-height: 20px;
@@ -519,17 +519,17 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
 .timeline { flex: 1; position: relative; min-height: 0; overflow: auto; overscroll-behavior-x: contain; border-top: 1px solid var(--line); scrollbar-color: var(--line) var(--surface-muted); }
 .timeline:focus-visible { outline-offset: -3px; }
 .timeline-content { width: calc(var(--label-width) + var(--plot-width)); min-width: 100%; position: relative; }
-.timeline-row { --bar-top: calc((var(--row-height) - var(--bar-height)) / 2); display: flex; min-height: var(--row-height); }
+.timeline-row { --bar-top: calc(50% - var(--bar-height) / 2); display: flex; min-height: var(--row-height); }
 .row-label { position: sticky; left: 0; z-index: 3; flex: 0 0 var(--label-width); width: var(--label-width); min-width: 0; padding: 0 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--grid); background: var(--surface); text-align: left; overflow: hidden; }
 button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: var(--row-height); }
 .row-label:hover { background: var(--surface-muted); }
 .row-label:focus-visible { z-index: 6; outline-offset: -3px; }
-.task-title { display: block; font-size: 12px; line-height: 14px; font-weight: 550; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.task-title, .task-meta { display: block; overflow-wrap: anywhere; }
+.task-title { font-size: 13px; line-height: 1.35; font-weight: 550; }
 .task-id { color: var(--muted); font-weight: 400; }
-.task-meta { display: block; color: var(--muted); font-size: 11px; line-height: 12px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.task-label { display: flex; align-items: center; gap: 7px; }
-.task-main { flex: 1; min-width: 0; min-height: calc(var(--row-height) - 1px); padding: 1px 0; border: 0; border-radius: 3px; background: transparent; text-align: left; }
-.activity-main { flex: 1; min-width: 0; }
+.task-meta { margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.task-label { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding-block: 5px; }
+.task-main { min-height: 0; padding: 0; border: 0; border-radius: 3px; background: transparent; text-align: left; }
 .overview-row { --row-height: 40px; }
 .task-main:hover { background: transparent; }
 .task-main:focus-visible { outline-offset: -1px; }
@@ -547,7 +547,7 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
 .critical-path-step-meta { color: var(--muted); }
 .critical-path-step-marker { margin-inline-start: 6px; color: var(--critical); font-weight: 650; }
 .critical-path-step-largest .critical-path-step-task { font-weight: 650; }
-.detail-toggle { flex: 0 0 auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font-size: 10px; line-height: 15px; color: var(--muted); background: var(--surface-muted); }
+.detail-toggle { align-self: flex-start; min-height: 25px; padding: 3px 7px; border-radius: 4px; font-size: 11px; line-height: 15px; color: var(--muted); background: var(--surface-muted); }
 .detail-toggle[aria-expanded=true] { background: var(--surface-selected); border-color: var(--running); color: var(--focus); }
 .row-plot { position: relative; flex: 0 0 var(--plot-width); width: var(--plot-width); min-height: var(--row-height); border-bottom: 1px solid var(--grid); background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px); background-size: var(--tick-width) 100%; background-position-x: var(--tick-offset); overflow: visible; }
 .axis-row { position: sticky; top: 0; min-height: 36px; z-index: 8; border-bottom: 1px solid var(--line); }
@@ -580,11 +580,12 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
 .row-marker { position: absolute; top: var(--bar-top); left: 13px; color: var(--muted); font-size: 11px; line-height: var(--bar-height); }
 .row-marker.warning { color: var(--warning); }
 .activity-span { background-color: var(--surface-muted); border: 1px solid var(--muted); color: var(--muted); }
-.bar.summary-bar { top: calc(var(--row-height) / 2 - 3px); height: 6px; border-radius: 3px; }
+.summary-row { --bar-height: 6px; }
+.bar.summary-bar { border-radius: 3px; }
 .summary-row .row-label { color: var(--done); }
 .child-row { --row-height: 24px; --bar-height: 14px; }
-.child-row .row-label { padding: 0 14px 0 28px; }
-.child-row .task-title { font-size: 11px; line-height: 23px; font-weight: 400; }
+.child-row .row-label { padding: 3px 14px 3px 28px; }
+.child-row .task-title { font-size: 12px; font-weight: 400; }
 .child-row .task-status { color: var(--muted); font-size: 10px; }
 .child-row .bar { font-size: 9px; border-radius: 3px; }
 .source-warnings { font-size: 12px; color: var(--warning); margin: 0; }
@@ -607,7 +608,7 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
   *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
 }
 @media (max-width: 1440px) {
-  :root { --label-width: 260px; }
+  :root { --label-width: 300px; }
   .work-area:has(.details:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
   .details { position: absolute; top: 0; right: 0; bottom: 0; z-index: 12; width: min(360px, 100%); box-shadow: var(--shadow); }
   .toolbar { gap: 6px; }
@@ -645,8 +646,6 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
   .follow { order: 3; margin-left: auto; min-height: 32px; padding-right: 7px; padding-left: 7px; font-size: 11px; }
   .legend-disclosure .legend { right: 0; }
   .row-label { padding-right: 10px; padding-left: 10px; }
-  .task-title { font-size: 11px; }
-  .detail-toggle { max-width: 60px; min-height: 25px; font-size: 11px; padding-right: 4px; padding-left: 4px; }
   .child-row .row-label { padding-left: 22px; padding-right: 10px; }
   .details dl { grid-template-columns: 90px minmax(0, 1fr); }
 }
