@@ -2,11 +2,13 @@
 
 ## Sources and ownership
 
-[providers.py](live_gantt/providers.py) joins readers under monitor serialization. Claude identifiers stay intact; Codex uses `codex-`. Failures stay isolated. Nothing makes provider requests; quota comes from local records. Web conversations are excluded; formats are private.
+[providers.py](live_gantt/providers.py) joins local readers under monitor serialization. Claude identifiers stay intact, Codex uses `codex-`, and failures stay isolated. Web conversations are excluded. Provider formats are private.
+
+[command_timings.py](live_gantt/command_timings.py) aggregates matched foreground call-to-result intervals across selected transcripts. Its fixed operation vocabulary keeps command arguments, paths and output out of timing summaries. Concurrent calls each contribute their own elapsed time. Background, opaque and incomplete calls contribute only to the unmeasured count.
 
 [sources.py](live_gantt/sources.py) reads Claude plans and transcripts. Task deletions persist; identity reads are bounded; custom titles win. Assistant response ends leave runtime unknown: Stop hooks may still run. Native status or a parent-turn event confirms the phase. Task or agent files establish chartability.
 
-Readers consume complete records by offset. Replacement, shrinkage, same-length changes or changed consumed-tail checkpoints rebuild history; edits preserving checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back; metadata and accounting cannot. Silence never means completion. Workflow journals supply identity and progress; results and hand-back finish agents, failure lines fail them. Running children keep workflows running; unfinished children inherit terminal workflow state. Resumes keep the first launch; the session's resumes, stops and same-label retries resolve unfinished work. Metadata assigns agents to tasks.
+Readers consume complete records by offset. Replacement, shrinkage and changed checkpoints rebuild history. Edits that preserve checkpoints can escape detection. Invalid task writes retain prior data without contributing progress. Only meaningful activity resumes terminal agents or clears hand-back. Silence never means completion. Workflow journals supply identity and progress. Results and hand-back finish agents, failure lines fail them, and running children keep workflows running. Unfinished children inherit terminal workflow state. Resumes preserve the first launch. Resumes, stops and same-label retries resolve unfinished work. Metadata assigns agents to tasks.
 
 External runs require explicit endings; processes and logs prove observations, never completion. Invalid metadata warns and preserves unknown estimates; unknown keys cannot schedule work.
 

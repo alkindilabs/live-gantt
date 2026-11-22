@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .command_timings import CommandTimings, summarize_command_timings
 from .freshness import session_active
 from .usage import empty_token_usage
 
@@ -30,7 +31,6 @@ PROMPT_TITLE_CHARACTERS = 120
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed"})
 DEFAULT_MILESTONE = "Main"
 LIVE_AGENT_STATUSES = frozenset({"running", "in_progress", "pending"})
-TIMESTAMP_PATTERN = re.compile(rb'"timestamp"\s*:\s*"([^"\\]+)"')
 CREATION_PATTERN = re.compile(r"^Task #(\S+) created successfully(?:\b|:)")
 NOTIFICATION_PATTERN = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 RESULT_LINE_PATTERN = re.compile(rb'"type"\s*:\s*"result"')
@@ -338,20 +338,22 @@ class _Transcript:
     stop_requests: dict[str, str] = field(default_factory=dict)
     stopped_tasks: set[str] = field(default_factory=set)
     workflow_calls: dict[str, datetime] = field(default_factory=dict)
+    command_timings: CommandTimings = field(default_factory=CommandTimings)
 
     def _consume(self, line: bytes) -> None:
-        timestamp_match = TIMESTAMP_PATTERN.search(line)
-        timestamp = parse_time(timestamp_match.group(1).decode("ascii", errors="ignore")) if timestamp_match else None
         self.naming.read(line)
         if b'"usage"' in line:
             self._read_usage(line)
-        if timestamp is None:
+        if b'"timestamp"' not in line:
             return
         try:
             record = json.loads(line)
         except (ValueError, UnicodeError):
             return
         if not isinstance(record, dict):
+            return
+        timestamp = parse_time(record.get("timestamp"))
+        if timestamp is None:
             return
         self.first = self.first or timestamp
         self._read_runtime(record)
@@ -366,6 +368,7 @@ class _Transcript:
             self._read_notifications(text, timestamp)
         if not isinstance(content, list):
             return
+        kind = record.get("type")
         for item in content:
             if not isinstance(item, dict):
                 continue
@@ -375,13 +378,22 @@ class _Transcript:
                 inputs = inputs if isinstance(inputs, dict) else {}
                 description = inputs.get("description")
                 self.activity = description if isinstance(description, str) else ""
-                if name == "TaskUpdate":
+                call_id = item.get("id")
+                if name == "Bash" and kind == "assistant" and isinstance(call_id, str) and call_id.strip():
+                    self.command_timings.start(call_id, inputs.get("command"), timestamp,
+                                               background=inputs.get("run_in_background") is True)
+                elif name == "TaskUpdate":
                     self._read_task_update(inputs, timestamp, item.get("id"))
                 elif name == "TaskStop":
                     self._read_stop_request(inputs, item.get("id"))
                 elif name == "Workflow" and isinstance(item.get("id"), str):
                     self.workflow_calls[item["id"]] = timestamp
             elif item.get("type") == "tool_result":
+                call_id = item.get("tool_use_id")
+                if kind == "user" and isinstance(call_id, str) and call_id.strip():
+                    tool_result = record.get("toolUseResult")
+                    task_id = tool_result.get("backgroundTaskId") if isinstance(tool_result, dict) else None
+                    self.command_timings.finish(call_id, timestamp, background=isinstance(task_id, str) and bool(task_id))
                 self._finish_task_update(item)
                 self._finish_stop(item, timestamp)
                 if item.get("is_error") is True:
@@ -728,8 +740,9 @@ class SourceStore:
             listing = self._listing(session, now, warnings, read_identity=True)
             tasks = [self._task(path, transcript) for path in self._task_paths(
                 session.task_dir or self.root / "tasks" / list_id)]
-            agents = self._agents(session, transcript, now, warnings)
-            workflows = self._workflows(session, transcript, now, warnings)
+            command_timings = {transcript.identity: transcript.command_timings}
+            agents = self._agents(session, transcript, now, warnings, command_timings)
+            workflows = self._workflows(session, transcript, now, warnings, command_timings)
             assignable = {**agents, **{agent["id"]: agent for workflow in workflows for agent in workflow["agents"]}}
             assigned: set[str] = set()
             for task in tasks:
@@ -740,6 +753,7 @@ class SourceStore:
                 workflow["agents"] = [agent for agent in workflow["agents"] if agent["id"] not in assigned]
             return {**listing, "transcriptUpdatedAt": _modified(session.transcript), "tasks": tasks,
                     "provider": "claude", "sourceId": session.id, "tokenUsage": transcript.token_usage(),
+                    "commandTimings": summarize_command_timings(command_timings.values()),
                     "_runtime": transcript.runtime(),
                     "agents": [agent for key, agent in agents.items() if key not in assigned],
                     "workflows": workflows, "warnings": warnings}
@@ -1056,7 +1070,8 @@ class SourceStore:
                          "status": "completed" if ended else "running"})
         return runs
 
-    def _agents(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> dict[str, dict[str, Any]]:
+    def _agents(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str],
+                command_timings: dict[tuple[int, int] | None, CommandTimings]) -> dict[str, dict[str, Any]]:
         if session.transcript is None:
             return {}
         directory = _agents_directory(session.transcript)
@@ -1068,6 +1083,7 @@ class SourceStore:
         agents: dict[str, dict[str, Any]] = {}
         for agent_id in sorted(agent_ids):
             transcript = self._transcript(directory / f"agent-{agent_id}.jsonl")
+            command_timings.setdefault(transcript.identity, transcript.command_timings)
             status, ended = _agent_state(transcript, notifications.get(agent_id), now)
             resolved = status == "stopped" and agent_id in stopped_here
             agents[agent_id] = self._agent(directory, agent_id, transcript, status, ended, resolved, warnings)
@@ -1086,7 +1102,8 @@ class SourceStore:
             "status": status, "resolved": resolved,
         }
 
-    def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str]) -> list[dict[str, Any]]:
+    def _workflows(self, session: _Session, parent: _Transcript, now: datetime, warnings: list[str],
+                   command_timings: dict[tuple[int, int] | None, CommandTimings]) -> list[dict[str, Any]]:
         """Return each workflow run, earliest start first, with its agents in journal start order.
 
         A journal result line or the agent's own hand-back finishes an agent; a journal failure line fails it. The run's state is its background
@@ -1112,6 +1129,7 @@ class SourceStore:
             lasts: list[datetime] = []
             for agent_id in [*journal.started, *sorted(_agent_ids(run) - set(journal.started))]:
                 transcript = self._transcript(run / f"agent-{agent_id}.jsonl")
+                command_timings.setdefault(transcript.identity, transcript.command_timings)
                 firsts += [transcript.first] if transcript.first else []
                 lasts += [transcript.last_execution] if transcript.last_execution else []
                 superseded = (launch is not None and launch.resumed is not None and transcript.first is not None

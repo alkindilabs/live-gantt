@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .command_timings import CommandTimings, summarize_command_timings
 from .freshness import session_active
 from .sources import (DEFAULT_MILESTONE, LIST_ID, RECENT_SESSION_WINDOW, SILENT_AFTER, TASK_STATUSES, UTC,
                       _finite, _iso, _prompt_title, _regular_stat, append_checkpoint, parse_time)
@@ -32,6 +33,7 @@ MAX_PENDING_NATIVE_CALLS = 32
 NATIVE_PLAN_LANE = "Native plan"
 PLAN_SUCCESS_OUTPUT = "Plan updated"
 NANOSECONDS_PER_SECOND = 1_000_000_000
+EXEC_EXIT_HEADER = re.compile(r"\AChunk ID: [^\r\n]+\r?\nWall time: [^\r\n]+\r?\nProcess exited with code -?\d+\r?\n")
 SESSION_FILENAME_ID = re.compile(r"([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})$")
 TOKEN_FIELDS = {
     "inputTokens": "input_tokens", "cachedInputTokens": "cached_input_tokens",
@@ -71,6 +73,19 @@ def _decode(line: bytes) -> dict:
         return _object(json.loads(line))
     except (ValueError, UnicodeError, RecursionError):
         return {}
+
+
+def _command_exited(output: object) -> bool:
+    if isinstance(output, str):
+        if EXEC_EXIT_HEADER.match(output):
+            return True
+        try:
+            output = json.loads(output)
+        except (ValueError, RecursionError):
+            return False
+    if not isinstance(output, dict) or output.get("session_id") is not None:
+        return False
+    return type(output.get("exit_code")) is int
 
 
 def _discovery_error(error):
@@ -168,6 +183,7 @@ class _Transcript:
     runtime_detail: str | None = None
     input_mode: str | None = None
     pending_inputs: dict = field(default_factory=dict)
+    command_timings: CommandTimings = field(default_factory=CommandTimings)
     plan: list = field(default_factory=list)
     plan_revision: int = 0
     pending_plans: dict = field(default_factory=dict)
@@ -310,7 +326,27 @@ class _Transcript:
                 "lastActivityAt": _iso(self.last_activity),
                 "detail": "Recorded input request has no recorded response" if unresolved else self.runtime_detail}
 
-    def consume(self, record: dict, source_id: str) -> None:
+    def _read_command(self, payload, timestamp):
+        call_id = _identifier(payload.get("call_id"))
+        if call_id is None:
+            return
+        kind = payload.get("type")
+        name = payload.get("name")
+        if kind == "custom_tool_call" and name in ("exec", "functions.exec"):
+            self.command_timings.unmeasured(call_id)
+        elif kind == "function_call" and name in ("exec_command", "functions.exec_command"):
+            try:
+                arguments = json.loads(payload.get("arguments", ""))
+            except (TypeError, ValueError, RecursionError):
+                arguments = {}
+            self.command_timings.start(call_id, _object(arguments).get("cmd"), timestamp)
+        elif kind == "function_call_output" and self.command_timings.awaiting(call_id):
+            if _command_exited(payload.get("output")):
+                self.command_timings.finish(call_id, timestamp)
+            else:
+                self.command_timings.unmeasured(call_id)
+
+    def consume(self, record: dict, source_id: str, *, include_command_timings: bool = True) -> None:
         timestamp = parse_time(record.get("timestamp"))
         payload = _object(record.get("payload"))
         kind = payload.get("type") if record.get("type") == "event_msg" else record.get("type")
@@ -318,6 +354,8 @@ class _Transcript:
             return
         if timestamp:
             self.first = min(self.first, timestamp) if self.first else timestamp
+        if include_command_timings and kind == "response_item":
+            self._read_command(payload, timestamp)
         self._plan_record(record, payload, timestamp)
         self._runtime_record(record, payload, kind, timestamp)
         if kind not in {"token_count", "token_usage_record"}:
@@ -372,7 +410,7 @@ class CodexSourceStore:
                     if session.parent not in sessions]
 
     def state(self, source_id: str, now: datetime) -> dict | None:
-        """Return the root's native plan, session activity and tokens, or None for unknown IDs."""
+        """Return the root's plan and tokens, with activity and command timings across its descendants."""
         if _identifier(source_id) is None:
             return None
         with self._lock:
@@ -392,6 +430,7 @@ class CodexSourceStore:
                     "tasks": deepcopy(transcripts[session.id].plan), "workflows": [], "warnings": [],
                     "agents": [self._agent(item, transcripts[item.id], now, item.id == source_id)
                                for item in selected], "tokenUsage": dict(transcripts[source_id].token_usage),
+                    "commandTimings": summarize_command_timings(item.command_timings for item in transcripts.values()),
                     "_runtime": transcripts[source_id].runtime()}
 
     def usage_snapshots(self) -> list[dict]:
@@ -562,7 +601,7 @@ class CodexSourceStore:
                     record = _decode(line)
                     if not line.endswith(b"\n") and not record:
                         break
-                    transcript.consume(record, session.id)
+                    transcript.consume(record, session.id, include_command_timings=tail_bytes is None)
                     transcript.offset = stream.tell()
                 transcript.checkpoint = append_checkpoint(stream, transcript.offset)
         except FileNotFoundError:

@@ -45,6 +45,40 @@ class CodexSourceTests(unittest.TestCase):
         return self.record("event_msg", {"type": "plan_update", "explanation": "Plan changed",
                                         "plan": [{"step": text, "status": status} for text, status in steps]}, at)
 
+    def test_command_timings_merge_completed_parent_and_child_calls_and_count_opaque_executions(self):
+        parent = self.session("commands")
+        child = self.session("worker", parent="commands")
+
+        def start(identifier, operation):
+            return self.record("response_item", {"type": "function_call", "name": "exec_command",
+                               "call_id": identifier, "arguments": json.dumps({"cmd": operation})})
+
+        def result(identifier, output, at):
+            return self.record("response_item", {"type": "function_call_output", "call_id": identifier,
+                               "output": output}, at)
+
+        self.append(parent, start("one", "git diff -- secret-file"))
+        self.append(child, start("one", "git diff"))
+        self.append(parent,
+                    self.record("response_item", {"type": "custom_tool_call", "name": "exec",
+                                "call_id": "hidden", "input": "arbitrary wrapped code"}),
+                    start("yielded", "forge test"),
+                    result("yielded", json.dumps({"session_id": 17, "output": "still running"}),
+                           "2026-10-18T11:59:01Z"),
+                    start("unknown-result", "git status"),
+                    result("unknown-result", "unstructured output", "2026-10-18T11:59:01Z"),
+                    result("one", json.dumps({"exit_code": 1, "output": "session_id: 99"}),
+                           "2026-10-18T11:59:06Z"))
+        self.assertEqual(self.store.state("commands", self.now)["commandTimings"], {
+            "operations": [{"label": "git diff", "calls": 1, "totalMs": 6000, "longestMs": 6000}],
+            "unmeasured": 4})
+        self.append(child, result("one", "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\n",
+                                  "2026-10-18T11:59:03Z"))
+        expected = {"operations": [{"label": "git diff", "calls": 2, "totalMs": 9000, "longestMs": 6000}],
+                    "unmeasured": 3}
+        self.assertEqual(self.store.state("commands", self.now)["commandTimings"], expected)
+        self.assertEqual(self.store.state("commands", self.now)["commandTimings"], expected)
+
     def test_native_plan_replaces_current_steps_and_keeps_ids_across_reorder(self):
         path = self.session("plan")
         self.append(path, self.plan([("Inspect", "completed"), ("Implement", "in_progress")]))
