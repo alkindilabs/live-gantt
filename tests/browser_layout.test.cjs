@@ -174,42 +174,78 @@ test("finish history keeps observed revisions, unknown estimates and completed m
     update(0, firstFinish);
     forecastSessions.set(session, feed);
     await page.goto(address.replace(SESSION_ID, session));
-    const history = page.locator("details").filter({ has: page.locator("summary", { hasText: "Finish history" }) });
-    const summary = history.locator("summary");
-    await summary.click({ timeout: 3000 });
-    const rows = history.locator("tbody tr");
+    const historyName = new RegExp(`^${name} finish history$`, "i");
+    const trigger = page.getByRole("button", { name: historyName });
+    const dialog = page.getByRole("dialog", { name: historyName });
+    const chart = dialog.getByRole("slider", { name: "Inspect forecast observations" });
+    const close = dialog.getByRole("button", { name: "Close finish history" });
+    const observations = dialog.locator("summary", { hasText: "Recorded observations" });
+    const rows = dialog.locator("tbody tr");
+    async function openHistory() {
+      await trigger.click({ timeout: 3000 });
+      await dialog.waitFor();
+      if (!await rows.first().isVisible()) await observations.click();
+      await rows.first().waitFor();
+    }
+    const activeValue = () => chart.getAttribute("aria-valuetext");
+    const chartHasFocus = () => chart.evaluate(el => el === document.activeElement);
     const recorded = () => rows.evaluateAll(items => items.map(row =>
       [...row.cells].map(cell => cell.querySelector("time")?.dateTime || cell.innerText)));
     const iso = value => new Date(value).toISOString();
-    await rows.first().waitFor();
+    await openHistory();
     assert.deepEqual(await recorded(), [[iso(at), iso(firstFinish)]]);
-    await summary.focus();
+    await chart.focus();
+    const firstValue = await activeValue();
     feed.response.write(`event: heartbeat\ndata: ${JSON.stringify({
       sync: { status: "current", checkedAt: iso(at + minute) },
     })}\n\n`);
     update(minute, revisedFinish);
     await rows.nth(1).waitFor();
-    assert.match(await summary.innerText(), /20 min earlier/);
-    assert.equal(await summary.evaluate(el => el === document.activeElement), true);
+    assert.match(await trigger.innerText(), /20 min earlier/);
+    assert.equal(await chartHasFocus(), true);
+    await chart.press("Home");
+    assert.equal(await activeValue(), firstValue);
+    await chart.press("ArrowRight");
+    const revisedValue = await activeValue();
+    assert.notEqual(revisedValue, firstValue);
+    await chart.press("ArrowDown");
+    assert.equal(await activeValue(), firstValue);
+    await chart.press("ArrowUp");
+    assert.equal(await activeValue(), revisedValue);
     update(2 * minute, null);
     await rows.nth(2).waitFor();
+    assert.equal(await chartHasFocus(), true);
+    assert.equal(await activeValue(), revisedValue);
+    await chart.press("End");
+    assert.match(await activeValue(), /unknown/i);
     update(3 * minute, revisedFinish);
     await rows.nth(3).waitFor();
+    assert.equal(await chartHasFocus(), true);
+    assert.match(await activeValue(), /unknown/i);
+    await chart.press("ArrowRight");
+    assert.doesNotMatch(await activeValue(), /unknown/i);
+    const lineSegments = await dialog.locator("path.finish-line").evaluateAll(paths => paths.flatMap(path =>
+      path.getAttribute("d").match(/M[^M]*/g) || []));
+    assert.equal(lineSegments.filter(segment => /L/i.test(segment)).length, 1);
     const expected = [[iso(at + 3 * minute), iso(revisedFinish)], [iso(at + 2 * minute), "Unknown"],
       [iso(at + minute), iso(revisedFinish)], [iso(at), iso(firstFinish)]];
     update(4 * minute, at + 4 * minute, false);
     await page.getByText(/Completed milestones.*Delivery/).waitFor();
     assert.deepEqual(await recorded(), expected);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     await page.reload();
-    await summary.click({ timeout: 3000 });
+    await openHistory();
     await rows.nth(3).waitFor();
     assert.deepEqual(await recorded(), expected);
+    await close.click();
+    await dialog.waitFor({ state: "hidden" });
     forecastSessions.set(otherSession, { model: { ...feed.model, id: otherSession, title: "Other delivery plan",
       milestones: [{ name, hasRemaining: true, hasEstimate: true, p50: iso(firstFinish) }] } });
     await page.goto(address.replace(SESSION_ID, otherSession));
     await page.locator("#session-title").filter({ hasText: "Other delivery plan" }).waitFor({ timeout: 3000 });
-    await summary.click();
-    await rows.first().waitFor();
+    await openHistory();
     assert.deepEqual(await recorded(), [[iso(at + 4 * minute), iso(firstFinish)]]);
   } finally {
     forecastSessions.delete(session);

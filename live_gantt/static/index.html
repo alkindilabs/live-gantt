@@ -130,5 +130,42 @@
         </div>
       </div>
     </main>
+    <dialog id="finish-dialog" class="finish-dialog" aria-label="Finish history">
+      <div class="finish-header">
+        <div><p>Finish history</p><h2 id="finish-name"></h2></div>
+        <form method="dialog"><button aria-label="Close finish history">Close</button></form>
+      </div>
+      <div class="finish-chart-heading">
+        <strong id="finish-y-caption">Expected finish</strong>
+        <span class="finish-reference">First forecast</span>
+      </div>
+      <div class="finish-chart">
+        <div id="finish-y-axis" class="finish-y-axis" aria-hidden="true"></div>
+        <div id="finish-plot" class="finish-plot" role="slider" tabindex="0"
+             aria-label="Inspect forecast observations" aria-valuemin="1" aria-valuemax="1" aria-valuenow="1"
+             aria-describedby="finish-instructions">
+          <svg id="finish-series" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <span id="finish-cursor" class="finish-cursor" aria-hidden="true"></span>
+          <span id="finish-point" class="finish-point" aria-hidden="true"></span>
+          <span id="finish-empty" hidden></span>
+        </div>
+        <div id="finish-x-axis" class="finish-x-axis" aria-hidden="true"></div>
+        <span id="finish-x-caption" class="finish-x-caption"></span>
+      </div>
+      <p id="finish-instructions" class="visually-hidden">Use the arrow keys to inspect observations. Home selects the first and End selects the last.</p>
+      <dl class="finish-readout">
+        <div><dt>Observed</dt><dd id="finish-observed"></dd></div>
+        <div><dt>Expected finish</dt><dd id="finish-expected"></dd></div>
+        <div><dt>From first forecast</dt><dd id="finish-shift"></dd></div>
+      </dl>
+      <details id="finish-values" class="finish-values">
+        <summary>Recorded observations</summary>
+        <div class="finish-table"><table>
+          <thead><tr><th scope="col">Observed</th><th scope="col">Expected finish</th></tr></thead>
+          <tbody id="finish-rows"></tbody>
+        </table></div>
+      </details>
+      <p id="finish-note" class="finish-note" hidden></p>
+    </dialog>
   </body>
 </html>
