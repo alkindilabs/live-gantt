@@ -2,14 +2,34 @@
 
 from collections import defaultdict
 from collections.abc import Hashable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from heapq import nsmallest
 from pathlib import PurePosixPath
 import re
 import shlex
 
 
+COMMAND_COMPLETED = "completed"
+COMMAND_FAILED = "failed"
+COMMAND_DENIED = "denied"
+
 _MILLISECOND = timedelta(milliseconds=1)
+_SLOWEST_CALL_COUNT = 5
+_REPORTED_OUTCOMES = (COMMAND_COMPLETED, COMMAND_FAILED, COMMAND_DENIED)
+_REVIEW_REJECTED = "reviewRejected"
+_UNKNOWN_OUTCOME = "unknown"
+_OUTCOMES = (*_REPORTED_OUTCOMES, _REVIEW_REJECTED, _UNKNOWN_OUTCOME)
+_GIT_COMMIT_SUBCOMMAND = "commit"
+_GIT_COMMIT_LABEL = f"git {_GIT_COMMIT_SUBCOMMAND}"
+_REVIEW_PROVIDERS = ("claude", "codex")
+_REVIEW_PROVIDER_PATTERN = "|".join(_REVIEW_PROVIDERS)
+_REVIEW_LINE = re.compile(
+    r"^principles-gate: (?:"
+    rf"reviewing staged changes with (?P<started>{_REVIEW_PROVIDER_PATTERN})|"
+    rf"(?P<rejected>{_REVIEW_PROVIDER_PATTERN}) review did not pass; principles could not be verified)\r?$",
+    re.MULTILINE,
+)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON = re.compile(r"python(?:3(?:\.[0-9]+)?)?")
 _FILE_DESCRIPTOR = re.compile(r"(?:[0-9]+|-)(?=$|[ \t<>])")
@@ -29,7 +49,7 @@ _OPERATIONS = {
     "gh pr": "checks checkout comment create diff edit list merge review status view",
     "gh run": "cancel download list rerun view watch",
     "git": (
-        "add apply blame branch cat-file checkout cherry-pick clean clone commit config diff fetch "
+        f"add apply blame branch cat-file checkout cherry-pick clean clone {_GIT_COMMIT_SUBCOMMAND} config diff fetch "
         "grep log ls-files ls-remote merge merge-base mv pull push rebase remote reset restore rev-parse "
         "rm show stash status switch tag worktree"
     ),
@@ -160,16 +180,65 @@ def _command_label(command: str) -> str | None:
         return None
 
 
+@dataclass(frozen=True)
+class _Call:
+    elapsed_ms: int
+    outcome: str
+    review_provider: str | None
+
+    def sort_key(self) -> tuple[int, str, str]:
+        return -self.elapsed_ms, self.outcome, self.review_provider or ""
+
+
+def _slowest_calls(calls: Iterable[_Call]) -> list[_Call]:
+    return nsmallest(_SLOWEST_CALL_COUNT, calls, key=_Call.sort_key)
+
+
+def _call_outcome(label: str, outcome: str | None, output: Iterable[str]) -> tuple[str, str | None]:
+    if outcome is None or outcome not in _REPORTED_OUTCOMES:
+        outcome = _UNKNOWN_OUTCOME
+    if label != _GIT_COMMIT_LABEL:
+        return outcome, None
+
+    started = set()
+    rejected = set()
+    for fragment in output:
+        for match in _REVIEW_LINE.finditer(fragment):
+            if match["started"]:
+                started.add(match["started"])
+            else:
+                rejected.add(match["rejected"])
+    conflicting_result = rejected and outcome not in (COMMAND_FAILED, _UNKNOWN_OUTCOME)
+    if len(started) != 1 or rejected - started or conflicting_result:
+        return outcome, None
+    if rejected and outcome == COMMAND_FAILED:
+        outcome = _REVIEW_REJECTED
+    return outcome, next(iter(started))
+
+
 @dataclass
-class _Timing:
+class _Duration:
     calls: int = 0
     total_ms: int = 0
-    longest_ms: int = 0
 
-    def add(self, calls: int, total_ms: int, longest_ms: int) -> None:
+    def add(self, calls: int, total_ms: int) -> None:
         self.calls += calls
         self.total_ms += total_ms
-        self.longest_ms = max(self.longest_ms, longest_ms)
+
+
+@dataclass
+class _Timing:
+    groups: dict[tuple[str, str | None], _Duration] = field(default_factory=lambda: defaultdict(_Duration))
+    slowest_calls: list[_Call] = field(default_factory=list)
+    process_observed: _Duration = field(default_factory=_Duration)
+    process_ms: int = 0
+
+    def add(self, call: _Call, process_ms: int | None) -> None:
+        self.groups[call.outcome, call.review_provider].add(1, call.elapsed_ms)
+        self.slowest_calls = _slowest_calls((*self.slowest_calls, call))
+        if type(process_ms) is int and 0 <= process_ms <= call.elapsed_ms:
+            self.process_observed.add(1, call.elapsed_ms)
+            self.process_ms += process_ms
 
 
 class CommandTimings:
@@ -194,8 +263,9 @@ class CommandTimings:
         """Return whether a result may provide a timing for this call."""
         return call_id in self._pending
 
-    def finish(self, call_id: Hashable, at: datetime, *, background: bool = False) -> None:
-        """Close a previously observed call once, recording a valid synchronous duration."""
+    def finish(self, call_id: Hashable, at: datetime, *, background: bool = False,
+               outcome: str | None = None, output: Iterable[str] = (), process_ms: int | None = None) -> None:
+        """Close a call once, recording its synchronous duration and any validated result evidence."""
         pending = self._pending.pop(call_id, None)
         if pending is None or background or not isinstance(at, datetime) or at.utcoffset() is None:
             return
@@ -203,7 +273,8 @@ class CommandTimings:
         if at < started:
             return
         elapsed_ms = (at - started) // _MILLISECOND
-        self._operations[label].add(1, elapsed_ms, elapsed_ms)
+        outcome, provider = _call_outcome(label, outcome, output)
+        self._operations[label].add(_Call(elapsed_ms, outcome, provider), process_ms)
         self._unmeasured -= 1
 
     def unmeasured(self, call_id: Hashable) -> None:
@@ -214,18 +285,65 @@ class CommandTimings:
         self._pending.pop(call_id, None)
 
 
+def _leader_detail(label: str, timings: list[_Timing]) -> dict:
+    outcomes = defaultdict(_Duration)
+    reviews = defaultdict(_Duration)
+    rejections = defaultdict(_Duration)
+    process_observed = _Duration()
+    process_ms = 0
+    for timing in timings:
+        for (outcome, provider), observed in timing.groups.items():
+            outcomes[outcome].add(observed.calls, observed.total_ms)
+            reviews[provider].add(observed.calls, observed.total_ms)
+            if outcome == _REVIEW_REJECTED:
+                rejections[provider].add(observed.calls, observed.total_ms)
+        process_observed.add(timing.process_observed.calls, timing.process_observed.total_ms)
+        process_ms += timing.process_ms
+
+    slowest = _slowest_calls(call for timing in timings for call in timing.slowest_calls)
+    has_reviews = any(provider in reviews for provider in _REVIEW_PROVIDERS)
+    return {
+        "label": label,
+        "slowestCalls": [
+            {"elapsedMs": call.elapsed_ms, "outcome": call.outcome, "reviewProvider": call.review_provider}
+            for call in slowest
+        ],
+        "outcomes": [
+            {"outcome": outcome, "calls": outcomes[outcome].calls, "totalMs": outcomes[outcome].total_ms}
+            for outcome in _OUTCOMES if outcome in outcomes
+        ],
+        "reviews": [
+            {"provider": provider, "calls": reviews[provider].calls, "totalMs": reviews[provider].total_ms,
+             "rejectedCalls": rejections[provider].calls, "rejectedMs": rejections[provider].total_ms}
+            for provider in (*_REVIEW_PROVIDERS, None) if provider in reviews
+        ] if has_reviews else [],
+        "processTiming": {
+            "calls": process_observed.calls, "observedMs": process_observed.total_ms, "processMs": process_ms,
+        } if process_observed.calls else None,
+    }
+
+
 def summarize_command_timings(transcripts: Iterable[CommandTimings]) -> dict:
-    """Merge transcript counts, ordered by descending total duration and then label."""
-    totals = defaultdict(_Timing)
+    """Merge transcript timings, ordered by descending total duration and then label."""
+    by_label = defaultdict(list)
     unmeasured = 0
     for transcript in transcripts:
         unmeasured += transcript._unmeasured
         for label, timing in transcript._operations.items():
-            totals[label].add(timing.calls, timing.total_ms, timing.longest_ms)
+            by_label[label].append(timing)
+    operations = []
+    for label, timings in by_label.items():
+        groups = [group for timing in timings for group in timing.groups.values()]
+        operations.append({
+            "label": label,
+            "calls": sum(group.calls for group in groups),
+            "totalMs": sum(group.total_ms for group in groups),
+            "longestMs": max(timing.slowest_calls[0].elapsed_ms for timing in timings),
+        })
+    operations.sort(key=lambda item: (-item["totalMs"], item["label"]))
+    leader = operations[0]["label"] if operations else None
     return {
-        "operations": [
-            {"label": label, "calls": timing.calls, "totalMs": timing.total_ms, "longestMs": timing.longest_ms}
-            for label, timing in sorted(totals.items(), key=lambda item: (-item[1].total_ms, item[0]))
-        ],
+        "operations": operations,
         "unmeasured": unmeasured,
+        "leaderDetail": _leader_detail(leader, by_label[leader]) if leader is not None else None,
     }

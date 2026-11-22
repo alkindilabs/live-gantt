@@ -15,12 +15,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .command_timings import CommandTimings, summarize_command_timings
+from .command_timings import (COMMAND_COMPLETED, COMMAND_DENIED, COMMAND_FAILED, CommandTimings,
+                              summarize_command_timings)
 from .freshness import session_active
 from .usage import empty_token_usage
 
 
 UTC = timezone.utc
+MILLISECONDS_PER_SECOND = timedelta(seconds=1) // timedelta(milliseconds=1)
 SILENT_AFTER = timedelta(minutes=30)
 RECENT_SESSION_WINDOW = timedelta(days=14)
 IDENTITY_SCAN_BYTES = 1024 * 1024
@@ -163,6 +165,36 @@ def _texts(content: Any) -> list[str]:
         return [item["text"] for item in content
                 if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)]
     return []
+
+
+def _command_result_evidence(item: dict, tool_result: Any, denial: Any) -> tuple[str | None, tuple[str, ...]]:
+    if isinstance(denial, str) and denial.strip():
+        return COMMAND_DENIED, ()
+    error = item.get("is_error", False)
+    outcome = None
+    if isinstance(error, bool):
+        outcome = COMMAND_FAILED if error else COMMAND_COMPLETED
+    if isinstance(tool_result, dict):
+        channels = (tool_result.get("stdout"), tool_result.get("stderr"))
+        output = tuple(channel for channel in channels if isinstance(channel, str))
+        if output:
+            return outcome, output
+    if error is True and isinstance(tool_result, str):
+        return outcome, (tool_result,)
+    return outcome, tuple(_texts(item.get("content")))
+
+
+def _possibly_backgrounded_results(results: list[dict], task_id: Any, *, sole_result: bool) -> set[str]:
+    if not isinstance(task_id, str) or not task_id:
+        return set()
+    possible = {call_id: item for item in results if (call_id := item.get("tool_use_id")) and isinstance(call_id, str)
+                and (sole_result or item.get("is_error") is not True)}
+    task_notice = f"{task_id}. Output is being written to: "
+    launch_notices = (f"Command running in background with ID: {task_notice}",
+                      f"Command was manually backgrounded by user with ID: {task_notice}")
+    identified = {call_id for call_id, item in possible.items()
+                  if any(text.startswith(launch_notices) for text in _texts(item.get("content")))}
+    return identified or set(possible)
 
 
 def _queued_texts(record: dict[str, Any]) -> list[str]:
@@ -363,12 +395,18 @@ class _Transcript:
             self.handed_back = timestamp
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        self._read_workflow_launch(record.get("toolUseResult"), timestamp, content)
+        tool_result = record.get("toolUseResult")
+        self._read_workflow_launch(tool_result, timestamp, content)
         for text in _texts(content) + _queued_texts(record):
             self._read_notifications(text, timestamp)
         if not isinstance(content, list):
             return
         kind = record.get("type")
+        results = ([item for item in content if isinstance(item, dict) and item.get("type") == "tool_result"]
+                   if kind == "user" else [])
+        sole_result = len(results) == 1
+        task_id = tool_result.get("backgroundTaskId") if isinstance(tool_result, dict) else None
+        possibly_backgrounded = _possibly_backgrounded_results(results, task_id, sole_result=sole_result)
         for item in content:
             if not isinstance(item, dict):
                 continue
@@ -390,10 +428,11 @@ class _Transcript:
                     self.workflow_calls[item["id"]] = timestamp
             elif item.get("type") == "tool_result":
                 call_id = item.get("tool_use_id")
-                if kind == "user" and isinstance(call_id, str) and call_id.strip():
-                    tool_result = record.get("toolUseResult")
-                    task_id = tool_result.get("backgroundTaskId") if isinstance(tool_result, dict) else None
-                    self.command_timings.finish(call_id, timestamp, background=isinstance(task_id, str) and bool(task_id))
+                if kind == "user" and isinstance(call_id, str) and self.command_timings.awaiting(call_id):
+                    outcome, output = _command_result_evidence(item, tool_result if sole_result else None,
+                                                               record.get("toolDenialKind") if sole_result else None)
+                    self.command_timings.finish(call_id, timestamp, background=call_id in possibly_backgrounded,
+                                                outcome=outcome, output=output)
                 self._finish_task_update(item)
                 self._finish_stop(item, timestamp)
                 if item.get("is_error") is True:

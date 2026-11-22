@@ -4,7 +4,7 @@
 
 [providers.py](live_gantt/providers.py) joins local readers under monitor serialization. Claude identifiers stay intact, Codex uses `codex-`, and failures stay isolated. Web conversations are excluded. Provider formats are private.
 
-[command_timings.py](live_gantt/command_timings.py) aggregates matched foreground call-to-result intervals across selected transcripts. Its fixed operation vocabulary keeps command arguments, paths and output out of timing summaries. Concurrent calls each contribute their own elapsed time. Background, opaque and incomplete calls contribute only to the unmeasured count.
+[command_timings.py](live_gantt/command_timings.py) sums foreground call-to-result intervals, including overlaps. It retains fixed labels, bounded slowest calls and reported timing evidence per operation so any leader can be explained without storing output or arguments. Background, opaque and incomplete calls count as unmeasured.
 
 [sources.py](live_gantt/sources.py) reads Claude plans and transcripts. Task deletions persist; identity reads are bounded; custom titles win. Assistant response ends leave runtime unknown: Stop hooks may still run. Native status or a parent-turn event confirms the phase. Task or agent files establish chartability.
 

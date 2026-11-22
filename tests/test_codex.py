@@ -71,13 +71,61 @@ class CodexSourceTests(unittest.TestCase):
                            "2026-10-18T11:59:06Z"))
         self.assertEqual(self.store.state("commands", self.now)["commandTimings"], {
             "operations": [{"label": "git diff", "calls": 1, "totalMs": 6000, "longestMs": 6000}],
-            "unmeasured": 4})
+            "unmeasured": 4,
+            "leaderDetail": {"label": "git diff",
+                             "slowestCalls": [{"elapsedMs": 6000, "outcome": "failed", "reviewProvider": None}],
+                             "outcomes": [{"outcome": "failed", "calls": 1, "totalMs": 6000}],
+                             "reviews": [], "processTiming": None},
+        })
         self.append(child, result("one", "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\n",
                                   "2026-10-18T11:59:03Z"))
-        expected = {"operations": [{"label": "git diff", "calls": 2, "totalMs": 9000, "longestMs": 6000}],
-                    "unmeasured": 3}
+        expected = {
+            "operations": [{"label": "git diff", "calls": 2, "totalMs": 9000, "longestMs": 6000}],
+            "unmeasured": 3,
+            "leaderDetail": {"label": "git diff", "slowestCalls": [
+                {"elapsedMs": 6000, "outcome": "failed", "reviewProvider": None},
+                {"elapsedMs": 3000, "outcome": "completed", "reviewProvider": None},
+            ], "outcomes": [
+                {"outcome": "completed", "calls": 1, "totalMs": 3000},
+                {"outcome": "failed", "calls": 1, "totalMs": 6000},
+            ], "reviews": [], "processTiming": {"calls": 1, "observedMs": 3000, "processMs": 10}},
+        }
         self.assertEqual(self.store.state("commands", self.now)["commandTimings"], expected)
         self.assertEqual(self.store.state("commands", self.now)["commandTimings"], expected)
+
+    def test_codex_command_diagnosis_uses_only_native_finished_result_timing(self):
+        path = self.session("command-diagnosis")
+        marker = "principles-gate: reviewing staged changes with codex"
+        rejected = "principles-gate: codex review did not pass; principles could not be verified"
+        records = (
+            ("measured", "Chunk ID: abc\nWall time: 1.001 seconds\nProcess exited with code 1\n"
+                         f"Original token count: 20\nOutput:\n{marker}\n{rejected}\nprivate output"),
+            ("fake-time", "Chunk ID: abc\nWall time: invalid\nProcess exited with code -0\n"
+                          "Final output:\nWall time: 0.2 seconds\n"),
+            ("structured", {"exit_code": 0, "output": "private output", "wall_time_seconds": 0.125}),
+            ("unsupported-time", {"exit_code": 0, "output": "private output", "wall_time_seconds": True}),
+            ("excessive-time", {"exit_code": 0, "output": "private output", "wall_time_seconds": 4}),
+            ("still-running", {"exit_code": 1, "output": marker, "wall_time_seconds": 0.5, "session_id": 42}),
+        )
+        for call_id, output in records:
+            self.append(path, self.record("response_item", {"type": "function_call", "name": "exec_command",
+                "call_id": call_id, "arguments": json.dumps({"cmd": "git commit"})}),
+                self.record("response_item", {"type": "function_call_output", "call_id": call_id, "output": output},
+                            "2026-10-18T11:59:03Z"))
+
+        timings = self.store.state("command-diagnosis", self.now)["commandTimings"]
+        self.assertEqual(timings["unmeasured"], 1)
+        detail = timings["leaderDetail"]
+        self.assertEqual(detail["processTiming"], {"calls": 2, "observedMs": 6000, "processMs": 1126})
+        self.assertEqual(detail["outcomes"], [
+            {"outcome": "completed", "calls": 4, "totalMs": 12000},
+            {"outcome": "reviewRejected", "calls": 1, "totalMs": 3000},
+        ])
+        self.assertEqual(detail["reviews"], [
+            {"provider": "codex", "calls": 1, "totalMs": 3000, "rejectedCalls": 1, "rejectedMs": 3000},
+            {"provider": None, "calls": 4, "totalMs": 12000, "rejectedCalls": 0, "rejectedMs": 0},
+        ])
+        self.assertNotIn("private", json.dumps(detail))
 
     def test_native_plan_replaces_current_steps_and_keeps_ids_across_reorder(self):
         path = self.session("plan")
