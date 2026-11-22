@@ -46,6 +46,50 @@ def quota(*windows, provider="codex"):
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_critical_path_follows_lane_and_explicit_dependencies_across_milestones(self):
+        model = project([
+            task(1, 2, lane="Design", milestone="Prototype"),
+            task(2, 2, lane="Design", milestone="Release"),
+            task(3, 1, lane="Build", milestone="Release", blockedBy=["2"]),
+            task(4, 4, lane="Review", milestone="Release"),
+        ], NOW)
+        milestones = {item["name"]: item for item in model["milestones"]}
+        self.assertEqual(milestones["Prototype"]["criticalPathTaskIds"], ["1"])
+        self.assertEqual(milestones["Release"]["p50"], timestamp(5))
+        self.assertEqual(milestones["Release"]["criticalPathTaskIds"], ["1", "2", "3"])
+
+    def test_critical_path_breaks_finish_ties_by_variance_then_natural_id(self):
+        uncertain = {"low": 0, "likely": 1, "high": 2}
+        model = project([
+            task(1, lane="A"),
+            task(10, lane="B", estimate=uncertain),
+            task(2, lane="C", estimate=uncertain),
+            task(11, lane="D", blockedBy=["1", "10", "2"]),
+            task(4, lane="E", blockedBy=["1", "10", "2"]),
+        ], NOW)
+        self.assertEqual(model["milestones"][0]["p50"], timestamp(2))
+        self.assertEqual(model["milestones"][0]["criticalPathTaskIds"], ["2", "4"])
+
+    def test_critical_path_includes_work_delayed_by_quota(self):
+        model = project([
+            task(1, lane="A"),
+            task(2, 2, lane="B", metadata={"provider": "external"}),
+        ], NOW, provider="codex", usage=quota(quota_window()))
+        self.assertEqual(model["milestones"][0]["p50"], timestamp(3))
+        self.assertEqual(model["milestones"][0]["criticalPathTaskIds"], ["1"])
+
+    def test_critical_path_is_empty_without_a_usable_work_forecast(self):
+        for items in (
+            [task(1, None), task(2)],
+            [task(1, lane="A", blockedBy=["2"]), task(2, lane="B", blockedBy=["1"])],
+            [task(1, blockedBy=["gone"])],
+            [task(1, status="completed", started=timestamp(-2), ended=timestamp(-1))],
+            [task(1, status="in_progress", started=timestamp(-1), liveProgress=100)],
+            [task(1), task(2, status="completed", started=timestamp(-1), ended=timestamp(2))],
+        ):
+            with self.subTest(items=items):
+                self.assertEqual(project(items, NOW)["milestones"][0]["criticalPathTaskIds"], [])
+
     def test_current_quota_limit_shifts_work_and_dependencies_without_mutating_input(self):
         items = [task(1, status="in_progress", started=timestamp(-1)),
                  task(2, lane="Other", blockedBy=["1"], metadata={"provider": "external"})]

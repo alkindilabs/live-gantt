@@ -26,7 +26,7 @@ A window takes the newest capture's reset period, unexpired first, and its highe
 
 ## Projection
 
-[schedule.py](live_gantt/schedule.py) owns pure `project(tasks, now, *, provider=None, usage=None)`; omitted options preserve existing calls. It copies inputs into projections, milestones and warnings. Actual times and activity never move; missing history stays missing. Completed tasks lacking end times are available now to dependents, without invented actual bars.
+[schedule.py](live_gantt/schedule.py) projects copies of tasks into forecasts and milestones. It preserves recorded activity and missing history. Dependents can start now when a completed task has no recorded end.
 
 Lanes reserve running work first, then pending tasks in natural identifier order. Multiple running tasks warn; pending tasks wait for all. `blockedBy` adds cross-lane prerequisites. Starts follow now, predecessor and blocker finishes. Prerequisite waits use `waitingFor`. Missing blockers, cycles and unknown estimates suppress affected forecasts; unknown never means zero duration.
 
@@ -34,7 +34,7 @@ Elapsed-hour Program Evaluation and Review Technique (PERT) estimates supply mea
 
 `metadata.provider` selects `claude`, `codex` or `external`; the session provider is default, except tasks with external runs and no agents. Only attributed shared-account limits constrain work. Fresh reached or predicted limits pause affected work and dependencies until reset; overlaps merge. Stale/unknown usage adds no delay; a reached limit without reset makes affected forecasts unknown. No provider fallback is automatic. Work segments exclude pauses; their envelope and milestone flags preserve reset anchors in the browser. Quota changes invalidate projections independently.
 
-Milestones weight completed tasks fully, in-progress tasks proportionally, pending zero. `hasRemaining` follows status even at 100%; `hasEstimate` means any remaining work is estimated. The 50th-percentile (P50) finish uses expected durations. The 90th-percentile (P90) adds `1.2816` times root-sum-square deviations on the controlling prerequisite chain, counting shared tasks once; mean controls joins, variance breaks ties. Deviations scale by remaining fraction. Both passes apply quota pauses. Independent durations and join approximations are assumptions; unknown required work suppresses affected finishes, while calendar overflow may leave P50 known and P90 unknown.
+Milestones weight completed tasks fully, running tasks by progress and pending tasks at zero. The 50th-percentile (P50) finish uses expected durations. The scheduler exposes one ordered critical path to that finish, including lane and cross-milestone prerequisites. Latest finish controls joins, then variance, then natural task identifier. The 90th-percentile (P90) adds 1.2816 times the root-sum-square of remaining deviations, assuming independent durations. Both forecasts account for quota pauses. Unknown required work suppresses the finish. Calendar overflow can leave only P50 known.
 
 ## Plan freshness
 
@@ -74,7 +74,7 @@ Read-only routes expose lists, selected state, quota and the running release. Ev
 
 ## Browser and process lifecycle
 
-[The browser](live_gantt/static/app.js) keeps account usage independent of selection. Timeline, inspector and sidebar scroll independently. Narrow screens switch between sidebar and timeline. The server owns staleness, pace and forecasts. Missing P50 differs from missing P90. Plan completion covers planned tasks alone. The browser retains bounded milestone P50 observations from successful session snapshots. Web Locks serialize local storage writes across tabs. Unavailable storage leaves history in the viewing tab.
+[The browser](live_gantt/static/app.js) keeps account usage independent of selection. Timeline, inspector and sidebar scroll independently. Narrow screens switch between sidebar and timeline. The server owns staleness, pace and forecasts. The browser highlights the largest task on each critical path by projected work time. Its share uses the time from observation to P50, including waits. Successful snapshots supply bounded milestone P50 history. Web Locks serialize storage writes across tabs. Unavailable storage leaves history in the viewing tab.
 
 The picker lists recent chartable work and selection; search reaches older work. `#session=<id>` survives reloads and discovery failures through direct checks; partial listings cannot replace it. One stream serves session or quota views. Hiding closes it; resuming gets a full snapshot. Only confirmed removal clears selection.
 

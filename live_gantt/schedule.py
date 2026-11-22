@@ -25,7 +25,7 @@ _SECONDS_PER_HOUR = timedelta(hours=1).total_seconds()
 @dataclass(frozen=True)
 class _Forecast:
     end: datetime | None
-    path: frozenset[str] = frozenset()
+    path: tuple[str, ...] = ()
     unestimated: bool = False
     anchored: bool = False
 
@@ -93,11 +93,19 @@ def _enrich(task: dict, now: datetime) -> dict:
     return enriched
 
 
-def _variance(path: frozenset[str], variances: dict[str, float]) -> float:
+def _variance(path: tuple[str, ...], variances: dict[str, float]) -> float:
     try:
         return math.fsum(variances[task_id] for task_id in path)
     except OverflowError:
         return math.inf
+
+
+def _controlling_forecast(forecasts: list[_Forecast], variances: dict[str, float]) -> _Forecast:
+    latest_end = max(forecast.end for forecast in forecasts)
+    return max(
+        (forecast for forecast in forecasts if forecast.end == latest_end),
+        key=lambda forecast: _variance(forecast.path, variances),
+    )
 
 
 def _calendar_end(start: datetime, hours: float) -> datetime | None:
@@ -201,9 +209,8 @@ def _schedule_work(start, hours, intervals, provider):
 def _upper_forecast(task, mean_forecast, predecessors, variances, now, intervals, provider):
     if mean_forecast.end is None or any(item.end is None for item in predecessors):
         return _Forecast(None, anchored=mean_forecast.anchored or any(item.anchored for item in predecessors))
-    controlling = max([_Forecast(now)] + predecessors,
-                      key=lambda item: (item.end, _variance(item.path, variances)))
-    path = controlling.path | {task["id"]}
+    controlling = _controlling_forecast([_Forecast(now)] + predecessors, variances)
+    path = (*controlling.path, task["id"])
     before = math.sqrt(_variance(controlling.path, variances))
     after = math.sqrt(_variance(path, variances))
     remaining = 1 - task["effectiveProgress"] / _PERCENT if task["status"] == "in_progress" else 1
@@ -218,10 +225,16 @@ def _upper_forecast(task, mean_forecast, predecessors, variances, now, intervals
     return _Forecast(end, mean_forecast.path)
 
 
-def _milestones(tasks: list[dict], forecasts: dict[str, _Forecast], upper_forecasts: dict[str, _Forecast], warnings: list[str]) -> list[dict]:
+def _milestones(
+    tasks: list[dict], forecasts: dict[str, _Forecast], upper_forecasts: dict[str, _Forecast],
+    variances: dict[str, float], warnings: list[str],
+) -> list[dict]:
     groups = defaultdict(list)
+    projected_work = set()
     for task in tasks:
         groups[task["milestone"]].append(task)
+        if any(segment["start"] != segment["end"] for segment in task["projectedSegments"]):
+            projected_work.add(task["id"])
     milestones = []
     for name, members in groups.items():
         largest_weight = max(task["weight"] for task in members)
@@ -238,15 +251,22 @@ def _milestones(tasks: list[dict], forecasts: dict[str, _Forecast], upper_foreca
         known_ends = [_time(task["ended"]) for task in members if task["status"] == "completed" and task["ended"]]
         p50 = p90 = max(known_ends, default=None)
         p50_anchored = p90_anchored = False
+        critical_path = []
         if remaining:
-            remaining_forecasts = [forecasts[task["id"]] for task in remaining]
+            remaining_forecasts = [
+                forecasts[task["id"]]
+                for task in sorted(remaining, key=lambda task: _id_key(task["id"]))
+            ]
             if any(forecast.end is None for forecast in remaining_forecasts):
                 p50 = p90 = None
                 p50_anchored = any(forecast.anchored for forecast in remaining_forecasts)
                 p90_anchored = any(upper_forecasts[task["id"]].anchored for task in remaining)
             else:
-                p50 = max([forecast.end for forecast in remaining_forecasts] + known_ends)
+                controlling = _controlling_forecast(remaining_forecasts, variances)
+                p50 = max([controlling.end] + known_ends)
                 p50_anchored = any(forecast.end == p50 and forecast.anchored for forecast in remaining_forecasts)
+                if controlling.end == p50 and not projected_work.isdisjoint(controlling.path):
+                    critical_path = list(controlling.path)
                 uncertain_ends = []
                 for task in remaining:
                     uncertain_end = upper_forecasts[task["id"]].end
@@ -264,6 +284,7 @@ def _milestones(tasks: list[dict], forecasts: dict[str, _Forecast], upper_foreca
             "p50": p50.isoformat() if p50 else None,
             "p90": p90.isoformat() if p90 else None,
             "p50Anchored": p50_anchored, "p90Anchored": p90_anchored,
+            "criticalPathTaskIds": critical_path,
         })
     return milestones
 
@@ -285,7 +306,10 @@ def project(tasks: list[dict], now: datetime, *, provider=None, usage=None) -> d
     describe remaining work, excluding completed tasks.
 
     Forecast uncertainty follows the prerequisite with the latest mean end,
-    breaking ties by variance, and adds each task's remaining variance once.
+    breaking ties by higher variance and then natural task ID order. Milestone
+    ``criticalPathTaskIds`` follows the same ordering to select the unfinished
+    task that reaches the expected finish and lists its chain in prerequisite
+    order. It is empty when no such chain contains projected work.
     Weighted milestone completion uses explicit progress, while forecast
     duration uses the larger of explicit and live-journal progress.
 
@@ -336,7 +360,7 @@ def project(tasks: list[dict], now: datetime, *, provider=None, usage=None) -> d
             missing[task_id] = requirements - by_id.keys()
             for absent in sorted(missing[task_id], key=_id_key):
                 _warn(task, f"Missing prerequisite task {absent}", warnings)
-        dependencies[task_id] = requirements & by_id.keys()
+        dependencies[task_id] = sorted(requirements & by_id.keys(), key=_id_key)
         for requirement in dependencies[task_id]:
             followers[requirement].append(task_id)
 
@@ -376,10 +400,7 @@ def project(tasks: list[dict], now: datetime, *, provider=None, usage=None) -> d
             elif inherited_unknown:
                 task["markers"].append("waiting for unresolved task")
         else:
-            controlling = max(
-                [_Forecast(now)] + predecessors,
-                key=lambda item: (item.end, _variance(item.path, variances)),
-            )
+            controlling = _controlling_forecast([_Forecast(now)] + predecessors, variances)
             remaining = 1 - task["effectiveProgress"] / _PERCENT if status == "in_progress" else 1
             task_provider = task_providers[task_id]
             intervals = outages.get(task_provider, [])
@@ -397,15 +418,15 @@ def project(tasks: list[dict], now: datetime, *, provider=None, usage=None) -> d
                 _warn(task, reason, warnings)
             else:
                 variances[task_id] = (deviation * remaining) ** 2
-                forecast = _Forecast(end, controlling.path | {task_id}, anchored=anchored)
+                forecast = _Forecast(end, (*controlling.path, task_id), anchored=anchored)
                 task["projectedStart"] = work.segments[0]["start"]
                 task["projectedEnd"] = end.isoformat()
                 if status == "pending":
-                    task["waitingFor"] = sorted((
+                    task["waitingFor"] = [
                         requirement for requirement in dependencies[task_id]
                         if by_id[requirement]["status"] != "completed"
                         and forecasts[requirement].end > now
-                    ), key=_id_key)
+                    ]
                     task["queued"] = bool(task["waitingFor"])
             upper = _upper_forecast(task, forecast,
                                    [upper_forecasts[requirement] for requirement in dependencies[task_id]],
@@ -426,7 +447,7 @@ def project(tasks: list[dict], now: datetime, *, provider=None, usage=None) -> d
         _warn(task, "A dependency cycle prevents projection", warnings)
     return {
         "tasks": enriched,
-        "milestones": _milestones(enriched, forecasts, upper_forecasts, warnings),
+        "milestones": _milestones(enriched, forecasts, upper_forecasts, variances, warnings),
         "warnings": warnings,
         "quotaConstrained": any(item.anchored for item in forecasts.values()) or
                             any(item.anchored for item in upper_forecasts.values()),
