@@ -130,6 +130,48 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(second["projectedStart"], timestamp(5))
         self.assertEqual(second["quotaDelays"], [])
         self.assertTrue(second["projectionAnchored"])
+        durations = {"workMs": 7_200_000, "quotaWaitMs": 14_400_000}
+        self.assertEqual(model["milestones"][0]["forecastDurations"], {"p50": durations, "p90": durations})
+
+    def test_percentiles_can_follow_different_branches_at_a_join(self):
+        model = project([
+            task(1, lane="A", milestone="Setup"),
+            task(2, lane="B", milestone="Setup", metadata={"provider": "external"},
+                 estimate={"low": 0, "likely": 0, "high": 10}),
+            task(3, lane="C", milestone="Release", blockedBy=["1", "2"], metadata={"provider": "external"}),
+        ], NOW, provider="codex", usage=quota(quota_window()))
+        release = next(item for item in model["milestones"] if item["name"] == "Release")
+        self.assertEqual(release["criticalPathTaskIds"], ["1", "3"])
+        self.assertEqual(release["forecastDurations"], {
+            "p50": {"workMs": 7_200_000, "quotaWaitMs": 7_200_000},
+            "p90": {"workMs": 17_289_600, "quotaWaitMs": 0},
+        })
+        setup = next(item for item in model["milestones"] if item["name"] == "Setup")
+        self.assertEqual(setup["forecastDurations"], {
+            "p50": {"workMs": 3_600_000, "quotaWaitMs": 7_200_000},
+            "p90": {"workMs": 13_689_600, "quotaWaitMs": 0},
+        })
+
+    def test_tied_finish_uses_the_same_deterministic_path_for_dates_and_durations(self):
+        model = project([
+            task(10, lane="A"),
+            task(2, 3, lane="B", metadata={"provider": "external"}),
+        ], NOW, provider="codex", usage=quota(quota_window()))
+        milestone = model["milestones"][0]
+        self.assertEqual(milestone["criticalPathTaskIds"], ["2"])
+        durations = {"workMs": 10_800_000, "quotaWaitMs": 0}
+        self.assertEqual(milestone["forecastDurations"], {"p50": durations, "p90": durations})
+
+    def test_unknown_and_unattributed_finish_durations_are_distinct_from_known_zero(self):
+        completed = task(1, status="completed", started=timestamp(-1), ended=timestamp(3))
+        unknown = {"p50": None, "p90": None}
+        for items in ([completed], [completed, task(2)], [completed, task(2, blockedBy=["1"])],
+                      [task(1, None)], [task(1, blockedBy=["missing"])]):
+            with self.subTest(items=items):
+                self.assertEqual(project(items, NOW)["milestones"][0]["forecastDurations"], unknown)
+        zero = {"workMs": 0, "quotaWaitMs": 0}
+        model = project([task(1, status="in_progress", started=timestamp(-1), liveProgress=100)], NOW)
+        self.assertEqual(model["milestones"][0]["forecastDurations"], {"p50": zero, "p90": zero})
 
     def test_provider_overrides_and_unassigned_external_runs_do_not_take_session_quota(self):
         model = project([task(1, lane="Other", metadata={"provider": "claude"}),
@@ -163,6 +205,7 @@ class ProjectionTests(unittest.TestCase):
             self.assertTrue(item["projectionAnchored"])
         self.assertTrue(model["warnings"])
         self.assertIsNone(model["milestones"][0]["p50"])
+        self.assertEqual(model["milestones"][0]["forecastDurations"], {"p50": None, "p90": None})
 
     def test_uncertain_completion_uses_provider_calendar_and_keeps_independent_variance(self):
         model = project([task(1, estimate={"low": 0, "likely": 1, "high": 2}),
@@ -174,6 +217,10 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(milestone["p90"], timestamp(expected_hours))
         self.assertFalse(milestone["p50Anchored"])
         self.assertTrue(milestone["p90Anchored"])
+        self.assertEqual(milestone["forecastDurations"]["p50"], {"workMs": 7_200_000, "quotaWaitMs": 0})
+        self.assertEqual(milestone["forecastDurations"]["p90"]["quotaWaitMs"], 6_840_000)
+        self.assertAlmostEqual(milestone["forecastDurations"]["p90"]["workMs"],
+                               (expected_hours - 1.9) * 3_600_000, delta=1)
 
     def test_uncertainty_pause_propagates_into_an_external_dependency(self):
         estimate = {"low": 0, "likely": 1, "high": 2}
@@ -391,6 +438,9 @@ class ProjectionTests(unittest.TestCase):
         model = project([task(1, estimate={"low": 0, "likely": 0, "high": 120})], near_limit)
         self.assertIsNotNone(model["milestones"][0]["p50"])
         self.assertIsNone(model["milestones"][0]["p90"])
+        self.assertEqual(model["milestones"][0]["forecastDurations"], {
+            "p50": {"workMs": 72_000_000, "quotaWaitMs": 0}, "p90": None,
+        })
         self.assertTrue(model["warnings"])
 
     def test_large_finite_weights_preserve_the_weighted_share(self):
