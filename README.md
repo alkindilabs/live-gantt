@@ -142,7 +142,7 @@ Running task bars end at now and have a patterned projection for the remaining e
 
 Milestones show weighted progress, **Expected finish**, **Later estimate** and time remaining. Expand **Critical path** to inspect the ordered tasks. The largest task’s share uses the full time until finish. Quota waits appear separately. **Needs estimates** means every remaining task lacks one. **Forecast unavailable** means the plan cannot produce a date. Completed milestones are grouped. Agent-only sessions show activity.
 
-**Command hot path** ranks session and subagent operations by cumulative call-to-result time. Count, average and longest call distinguish repeated overhead from slow runs. Concurrent calls count separately. Coverage shows unmeasured calls.
+**Command hot path** ranks session and subagent operations by their share of all measured call-to-result time. Parallel calls count separately. Counts, averages and longest calls show where repeated or slow work adds up.
 
 The default timeline view is **12 h**, with now one quarter of the way across the visible chart. Use **12 h**, **3 days**, **Week** or **Fit**; the browser remembers your choice when local storage is available. **Fit** uses the overview rows and includes individual children only when expanded. The view follows now until you scroll horizontally; **Follow now** resumes it. **Status key** explains bar patterns without occupying the chart by default.
 

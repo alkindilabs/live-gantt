@@ -2,6 +2,7 @@
 
 const PERCENT_SCALE = 100;
 const COMMAND_TIMING_PREVIEW_COUNT = 4;
+const MINIMUM_DISPLAYED_COMMAND_PERCENT = 1;
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
@@ -90,7 +91,7 @@ function savedFinishHistory() {
 }
 
 const elements = Object.fromEntries(
-  ["version", "overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "command-timings", "command-timings-coverage", "command-timings-list", "command-timings-toggle", "command-timings-wrappers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
+  ["version", "overview-panel", "overview-toggle", "monitor-status", "monitor-title", "monitor-summary", "monitor-activity", "monitor-details", "monitor-last-known", "monitor-issues", "usage-providers", "command-timings", "command-timings-coverage", "command-timings-basis", "command-timings-list", "command-timings-toggle", "command-timings-wrappers", "session-tokens", "token-values", "session-provider", "session", "session-heading", "session-name", "session-description", "session-control", "session-title", "session-meta", "session-panel", "session-filter", "session-all", "session-options", "session-summary", "project", "connection", "connection-text", "connection-age", "freshness", "overview", "overview-title", "harness-health", "forecast-health", "milestones", "timeline", "timeline-content", "notice", "follow", "task-count", "warnings", "details", "details-content", "close-details"].map(id => [id, document.getElementById(id)]),
 );
 const state = {
   model: null,
@@ -876,17 +877,26 @@ function renderCommandTimings() {
     : "No command calls recorded.";
   const list = elements["command-timings-list"];
   const toggle = elements["command-timings-toggle"];
-  const maxTotal = operations[0]?.totalMs ?? 0;
+  const measuredTime = operations.reduce((total, operation) => total + operation.totalMs, 0);
+  const basis = elements["command-timings-basis"];
+  basis.hidden = measuredTime === 0;
+  basis.textContent = measuredTime > 0 ? `Share of ${commandDuration(measuredTime)} measured command time` : "";
   list.replaceChildren();
   list.hidden = !operations.length;
   const visibleOperations = state.commandTimingsExpanded ? operations : operations.slice(0, COMMAND_TIMING_PREVIEW_COUNT);
   for (const { label, calls, totalMs, longestMs } of visibleOperations) {
     const row = node("li", "command-timing");
     const heading = node("div", "command-timing-heading");
-    heading.append(node("span", "command-timing-label", label),
-      node("strong", "command-timing-total", `${commandDuration(totalMs)} total`));
+    const total = node("strong", "command-timing-total", `${commandDuration(totalMs)} total`);
+    if (measuredTime > 0) {
+      const share = totalMs / measuredTime * PERCENT_SCALE;
+      const shareLabel = share > 0 && share < MINIMUM_DISPLAYED_COMMAND_PERCENT
+        ? `<${percent(MINIMUM_DISPLAYED_COMMAND_PERCENT)}` : percent(share);
+      total.append(` · ${shareLabel}`);
+    }
+    heading.append(node("span", "command-timing-label", label), total);
     const meter = node("progress", "command-timing-meter");
-    if (maxTotal > 0) meter.max = maxTotal;
+    if (measuredTime > 0) meter.max = measuredTime;
     meter.value = totalMs;
     meter.setAttribute("aria-hidden", "true");
     const stats = node("span", "command-timing-stats",
