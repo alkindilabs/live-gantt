@@ -15,6 +15,7 @@
   --running-fill: #d7e8f9;
   --projected: #6b80a0;
   --projected-fill: #f2f5fb;
+  --critical: #56449a;
   --overrun: #936014;
   --overrun-fill: #fff0d4;
   --blocked: #855d92;
@@ -49,6 +50,7 @@
     --running-fill: #2d547d;
     --projected: #b2c2db;
     --projected-fill: #23364f;
+    --critical: #c6b8ff;
     --overrun: #e8bd72;
     --overrun-fill: #544424;
     --blocked: #d2b0df;
@@ -249,6 +251,42 @@ h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 650; letter-spac
 .forecast-remaining { color: var(--running); font-size: 11px; }
 .forecast-explanation { grid-column: 1 / -1; margin: 0; color: var(--warning); font-size: 12px; }
 .forecast-unavailable .forecast-time { color: var(--muted); }
+.critical-path {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-inline-start: 3px solid var(--critical);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--critical) 7%, var(--surface));
+}
+.critical-path-label, .critical-path-share { color: var(--muted); font-size: 11px; }
+.critical-path-task {
+  justify-self: start;
+  min-height: 24px;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: var(--critical);
+  font-weight: 640;
+  font-size: 13px;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.critical-path-task:hover { background: transparent; text-decoration: underline; }
+.critical-path-meter {
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  background: var(--line);
+  accent-color: var(--critical);
+}
+.critical-path-meter::-webkit-progress-bar { background: var(--line); }
+.critical-path-meter::-webkit-progress-value { background: var(--critical); }
+.critical-path-meter::-moz-progress-bar { background: var(--critical); }
 .finish-history {
   grid-column: 1 / -1;
   display: flex;
@@ -442,6 +480,8 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
 .task-label:hover, .task-label:has(.task-main:hover) { background: var(--surface-muted); }
 .task-label:has(.task-main[aria-expanded=true]), .child-row .row-label[aria-expanded=true] { background: var(--surface-selected); }
 .task-main[aria-expanded=true] .task-title { color: var(--focus); }
+.task-label:has(.critical-path-highlight) { box-shadow: inset 3px 0 var(--critical); }
+.critical-path-marker { color: var(--critical); font-weight: 650; }
 .detail-toggle { flex: 0 0 auto; min-height: 25px; padding: 3px 6px; border-radius: 4px; font-size: 10px; line-height: 15px; color: var(--muted); background: var(--surface-muted); }
 .detail-toggle[aria-expanded=true] { background: var(--surface-selected); border-color: var(--running); color: var(--focus); }
 .row-plot { position: relative; flex: 0 0 var(--plot-width); width: var(--plot-width); min-height: var(--row-height); border-bottom: 1px solid var(--grid); background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px); background-size: var(--tick-width) 100%; background-position-x: var(--tick-offset); overflow: visible; }
@@ -469,6 +509,7 @@ button.row-label { border-radius: 0; border-top: 0; border-left: 0; min-height: 
 .row-marker.blocked-marker { color: var(--blocked); }
 .silent { background-color: var(--silent-fill); color: var(--silent); border: 1px dashed var(--silent); }
 .bar.projected-tail { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.bar.projected.critical-path-highlight { border: 2px dashed var(--critical); background-color: color-mix(in srgb, var(--critical) 13%, var(--surface)); color: var(--critical); }
 .bar.has-tail { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .live-dot { position: absolute; top: calc(50% - 2.5px); left: 4px; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .row-marker { position: absolute; top: var(--bar-top); left: 13px; color: var(--muted); font-size: 11px; line-height: var(--bar-height); }

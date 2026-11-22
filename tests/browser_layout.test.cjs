@@ -152,6 +152,79 @@ async function assertFixedDocument(page, viewport) {
   assert.equal(dimensions.y, 0);
 }
 
+test("the largest critical-path task links to the inspector and updates with the forecast", async () => {
+  const viewport = { width: 390, height: 844 };
+  const page = await browser.newPage({ viewport });
+  const session = "critical-path";
+  const base = Date.now();
+  const iso = hours => new Date(base + hours * HOUR_MILLISECONDS).toISOString();
+  const { model } = fixture();
+  const name = "Delivery";
+  const task = (id, subject, intervals) => ({
+    ...model.tasks[0], id, subject, milestone: name, lane: subject,
+    projectedStart: iso(intervals[0][0]), projectedEnd: iso(intervals.at(-1)[1]),
+    projectedSegments: intervals.map(([start, end]) => ({ start: iso(start), end: iso(end) })),
+    projectionAnchored: true,
+  });
+  const preparation = task("1", "Preparation", [[0, 0.5]]);
+  const integration = {
+    ...task("2", "Integration", [[0.5, 1], [3, 4]]),
+    quotaDelays: [{ start: iso(1), end: iso(3), provider: "claude", reason: "predicted" }],
+  };
+  const parallel = task("3", "Parallel work", [[0, 2]]);
+  const milestone = {
+    name, hasRemaining: true, hasEstimate: true, p50: iso(4), p50Anchored: true,
+    criticalPathTaskIds: [preparation.id, integration.id],
+  };
+  const feed = {
+    model: { ...model, id: session, observedAt: iso(0), tasks: [preparation, integration, parallel], milestones: [milestone] },
+  };
+  const update = change => {
+    feed.model.milestones = [{ ...milestone, ...change }];
+    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+  };
+  try {
+    forecastSessions.set(session, feed);
+    await page.goto(address.replace(SESSION_ID, session));
+    await openOverview(page, viewport);
+    const largest = page.locator(".critical-path");
+    await largest.getByText("Largest task on the critical path", { exact: true }).waitFor({ timeout: 5000 });
+    const button = largest.getByRole("button", { name: "#2 Integration" });
+    await largest.getByText("1.5 h of 4 h until expected finish (38%)", { exact: true }).waitFor();
+    await button.click();
+    assert.equal(await page.locator("#overview-toggle").getAttribute("aria-expanded"), "false");
+    const inspector = page.locator("#details");
+    await inspector.getByRole("heading", { name: "Integration" }).waitFor();
+    assert.equal(await page.locator("#close-details").evaluate(element => element === document.activeElement), true);
+    await page.keyboard.press("Escape");
+    const row = page.getByRole("button", { name: /Task 2: Integration.*Largest on path/ });
+    await row.waitFor();
+    assert.equal(await row.evaluate(element => element === document.activeElement), true);
+    assert.equal(await page.locator(".bar.projected.critical-path-highlight").count(), 2);
+    assert.equal(await page.locator(".quota-pause.critical-path-highlight").count(), 0);
+    assert.equal(await page.locator(".task-main.critical-path-highlight").count(), 1);
+
+    await openOverview(page, viewport);
+    await button.focus();
+    update({ criticalPathTaskIds: [parallel.id], p50: iso(2) });
+    const next = largest.getByRole("button", { name: "#3 Parallel work" });
+    await next.waitFor();
+    assert.equal(await next.evaluate(element => element === document.activeElement), true);
+    await largest.getByText("2 h of 2 h until expected finish (100%)", { exact: true }).waitFor();
+    await next.click();
+    await inspector.getByRole("heading", { name: "Parallel work" }).waitFor();
+    assert.equal(await page.locator(".task-main.critical-path-highlight").count(), 1);
+    assert.match(await page.locator(".task-main.critical-path-highlight").innerText(), /Parallel work/);
+    update({ p50: null, criticalPathTaskIds: [] });
+    await page.locator(".forecast-unavailable").waitFor({ state: "attached" });
+    assert.equal(await largest.count(), 0);
+    assert.equal(await page.locator(".critical-path-highlight").count(), 0);
+  } finally {
+    forecastSessions.delete(session);
+    await page.close();
+  }
+});
+
 test("finish history keeps observed revisions, unknown estimates and completed milestone history across reloads", async () => {
   const page = await browser.newPage({ viewport: VIEWPORTS[0] });
   const session = "forecast-history";

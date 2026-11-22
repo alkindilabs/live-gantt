@@ -121,6 +121,7 @@ const state = {
   lastScrollLeft: 0,
   tracks: [],
   milestoneDates: [],
+  criticalPathHighlights: new Map(),
   finishHistory: savedFinishHistory(),
   finishViews: new Map(),
   finishName: null,
@@ -1083,7 +1084,15 @@ function renderTask(task) {
   const meta = node("span", "task-meta", taskSubtitle(task));
   main.append(title, meta);
   main.title = taskDescription(task);
-  main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskDescription(task)}. Show details.`);
+  const criticalMilestones = state.criticalPathHighlights.get(task.id);
+  if (criticalMilestones) {
+    main.classList.add("critical-path-highlight");
+    const marker = node("span", "critical-path-marker", "Largest on path");
+    marker.title = `Largest task on the critical path for ${criticalMilestones.join(", ")}`;
+    main.append(marker);
+  }
+  const criticalLabel = criticalMilestones ? ` Largest on path for ${criticalMilestones.join(", ")}.` : "";
+  main.setAttribute("aria-label", `Task ${task.id}: ${task.subject || "Untitled task"}. ${taskDescription(task)}.${criticalLabel} Show details.`);
   attachDetails(main, task, "task", `task:${task.id}`);
   label.append(main);
   if (agents.length || runs.length) {
@@ -1238,8 +1247,9 @@ function paintTask(track, task, now) {
       const start = running ? Math.max(now, segment.start) : segment.start;
       if (segment.end < start || (running && segment.end === start)) continue;
       const tail = running && segment.start <= now ? " projected-tail" : "";
-      createBar(track, `projected${tail}${task.queued ? " queued" : ""}`, start, segment.end,
+      const bar = createBar(track, `projected${tail}${task.queued ? " queued" : ""}`, start, segment.end,
         task.queued ? waitingLabel(task) : "Projected");
+      if (state.criticalPathHighlights.has(task.id)) bar?.classList.add("critical-path-highlight");
     }
     for (const delay of taskQuotaDelays(task)) {
       const pause = createBar(track, `quota-pause${delay.end === null ? " open-end" : ""}`,
@@ -1561,10 +1571,54 @@ function inspectAtPointer(event) {
 finish.plot.addEventListener("pointerdown", inspectAtPointer);
 finish.plot.addEventListener("pointermove", inspectAtPointer);
 
+function largestCriticalPathTask(milestone, tasks, observedAt) {
+  const finish = timestamp(milestone.p50);
+  const path = milestone.criticalPathTaskIds;
+  if (observedAt === null || finish === null || finish <= observedAt || !Array.isArray(path)) return null;
+  let largest = null;
+  for (const id of path) {
+    const task = tasks.get(id);
+    if (!task || task.status === "completed") continue;
+    const work = taskSegments(task, observedAt).reduce((total, segment) => total + segment.end - segment.start, 0);
+    if (work > (largest?.work ?? 0)) largest = { task, work };
+  }
+  return largest && { ...largest, timeUntilFinish: finish - observedAt };
+}
+
+function renderCriticalPath(milestone, contribution) {
+  const { task, work, timeUntilFinish } = contribution;
+  const share = work / timeUntilFinish * PERCENT_SCALE;
+  const panel = node("div", "critical-path");
+  const label = node("span", "critical-path-label", "Largest task on the critical path");
+  const button = node("button", "critical-path-task", `#${task.id} ${task.subject || "Untitled task"}`);
+  button.type = "button";
+  button.dataset.criticalMilestone = milestone.name;
+  button.addEventListener("click", () => {
+    setOverviewOpen(false);
+    const key = `task:${task.id}`;
+    state.detailEntries.get(key)?.target.click();
+    state.focusTargets.get(key)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+  const value = node("span", "critical-path-share",
+    `${hours(work / HOUR)} of ${hours(timeUntilFinish / HOUR)} until expected finish (${percent(share)})`);
+  value.title = "Projected work excludes quota pauses. The share uses the forecast snapshot.";
+  const meter = node("progress", "critical-path-meter");
+  meter.max = PERCENT_SCALE;
+  meter.value = share;
+  meter.setAttribute("aria-hidden", "true");
+  panel.append(label, button, value, meter);
+  return { panel, button };
+}
+
 function renderMilestones(now) {
   const focused = document.activeElement?.closest(".finish-history");
+  const focusedCriticalMilestone = document.activeElement?.dataset.criticalMilestone;
+  let criticalFocus = null;
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
+  state.criticalPathHighlights.clear();
+  const observedAt = timestamp(state.model.observedAt);
+  const tasks = new Map((state.model.tasks || []).map(task => [task.id, task]));
   const cards = node("div", "milestone-cards");
   const done = [];
   const milestones = state.model.milestones || [];
@@ -1606,14 +1660,26 @@ function renderMilestones(now) {
         ? "Forecast unavailable. Review the plan for missing estimates or unresolved dependencies."
         : "Needs estimates. Ask your coding agent to estimate the remaining tasks."));
     }
-    card.append(finishButton(name));
+    const historyButton = finishButton(name);
+    const contribution = largestCriticalPathTask(milestone, tasks, observedAt);
+    if (contribution) {
+      const id = contribution.task.id;
+      if (!state.criticalPathHighlights.has(id)) state.criticalPathHighlights.set(id, []);
+      state.criticalPathHighlights.get(id).push(name);
+      const { panel, button } = renderCriticalPath(milestone, contribution);
+      card.append(panel);
+      if (name === focusedCriticalMilestone) criticalFocus = button;
+    } else if (name === focusedCriticalMilestone) criticalFocus = historyButton;
+    card.append(historyButton);
     cards.append(card);
   }
   if (cards.childElementCount) elements.milestones.append(cards);
   if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.map(item => item.name).join(", ")}`));
   for (const milestone of done) {
     if (state.finishHistory.some(sample => sample.session === state.selected && sample.name === milestone.name)) {
-      elements.milestones.append(finishButton(milestone.name, true));
+      const button = finishButton(milestone.name, true);
+      elements.milestones.append(button);
+      if (milestone.name === focusedCriticalMilestone) criticalFocus = button;
     }
   }
   if (!milestones.length) {
@@ -1626,6 +1692,7 @@ function renderMilestones(now) {
   }
   refreshFinishHistory();
   if (focused?.isConnected) focused.focus({ preventScroll: true });
+  criticalFocus?.focus({ preventScroll: true });
   paintMilestones(now);
 }
 
