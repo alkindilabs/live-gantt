@@ -235,6 +235,16 @@ test("the largest critical-path task links to the inspector and updates with the
     feed.model.tasks[1].quotaDelays[0].reason = "reached";
     update({ p50: iso(5) });
     await majorityWait.getByText("Claude Code · Quota limit reached", { exact: true }).waitFor();
+    update({ p50: iso(5), forecastDurations: {
+      p50: { workMs: 2 * HOUR_MILLISECONDS, quotaWaitMs: 3 * HOUR_MILLISECONDS }, p90: null,
+    } });
+    await page.locator(".expected-finish").getByRole("group", { name: "At last forecast" }).waitFor();
+    assert.equal(await majorityWait.getByText("Claude Code · Quota limit reached", { exact: true }).isVisible(), true);
+    assert.equal(await page.getByText("2 h work · 3 h projected quota wait", { exact: true }).count(), 0);
+    update({ p50: iso(5), forecastDurations: { p50: null, p90: null }, progress: 60 });
+    await page.locator('progress[aria-label="Delivery progress"][value="60"]').waitFor();
+    assert.equal(await majorityWait.count(), 0, "An unavailable split cannot be inferred from task segments");
+    assert.equal(await page.getByText("2 h work · 3 h projected quota wait", { exact: true }).count(), 0);
     await button.focus();
     update({ criticalPathTaskIds: [parallel.id], p50: iso(2) });
     const next = largest.getByRole("button", { name: "#3 Parallel work" });
@@ -251,6 +261,67 @@ test("the largest critical-path task links to the inspector and updates with the
     await page.locator(".forecast-unavailable").waitFor({ state: "attached" });
     assert.equal(await largest.count(), 0);
     assert.equal(await page.locator(".critical-path-highlight").count(), 0);
+  } finally {
+    forecastSessions.delete(session);
+    await page.close();
+  }
+});
+
+test("finish estimates show their own active work and projected quota wait on live updates", async () => {
+  const viewport = { width: 390, height: 844 };
+  const page = await browser.newPage({ viewport });
+  const session = "forecast-durations";
+  const base = Date.now();
+  const iso = hours => new Date(base + hours * HOUR_MILLISECONDS).toISOString();
+  const { model } = fixture();
+  const milestone = {
+    name: "Delivery", hasRemaining: true, hasEstimate: true, p50: iso(2.5), p90: iso(7.75),
+    forecastDurations: {
+      p50: { workMs: 2.5 * HOUR_MILLISECONDS, quotaWaitMs: 0 },
+      p90: { workMs: 4.5 * HOUR_MILLISECONDS, quotaWaitMs: 3.25 * HOUR_MILLISECONDS },
+    },
+  };
+  const feed = { model: { ...model, id: session, observedAt: iso(0), milestones: [milestone] } };
+  const update = change => {
+    feed.model.milestones = [{ ...milestone, ...change }];
+    feed.response.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+  };
+  try {
+    forecastSessions.set(session, feed);
+    await page.goto(address.replace(SESSION_ID, session));
+    await openOverview(page, viewport);
+    const expected = page.locator(".expected-finish");
+    const later = page.locator(".later-finish");
+    const expectedSplit = expected.getByRole("group", { name: "At last forecast" });
+    const laterSplit = later.getByRole("group", { name: "At last forecast" });
+    await expectedSplit.getByText("2 h 30 min", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await expectedSplit.getByText("Active work", { exact: true }).isVisible(), true);
+    assert.equal(await expectedSplit.getByText("Quota wait", { exact: true }).isVisible(), true);
+    assert.equal(await expectedSplit.getByText("0 min", { exact: true }).isVisible(), true);
+    assert.equal(await laterSplit.getByText("4 h 30 min", { exact: true }).isVisible(), true);
+    assert.equal(await laterSplit.getByText("3 h 15 min", { exact: true }).isVisible(), true);
+    const bounds = await laterSplit.evaluate(element => ({
+      available: element.clientWidth, contents: element.scrollWidth,
+    }));
+    assert.ok(bounds.contents <= bounds.available + GEOMETRY_TOLERANCE, "The split fits its mobile forecast column");
+    const bar = laterSplit.locator(".forecast-composition");
+    const waitWidth = (await bar.locator(".forecast-wait").boundingBox()).width;
+    const barWidth = (await bar.boundingBox()).width;
+    assert.ok(Math.abs(waitWidth - barWidth * 3.25 / 7.75) <= GEOMETRY_TOLERANCE, "Bar lengths reflect their share of time");
+
+    update({ p50: new Date(base + 3.25 * HOUR_MILLISECONDS + 1).toISOString(), p90: null, forecastDurations: {
+      p50: { workMs: 1, quotaWaitMs: 3.25 * HOUR_MILLISECONDS },
+      p90: null,
+    } });
+    await expectedSplit.getByText("3 h 15 min", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await expectedSplit.getByText("<1 min", { exact: true }).isVisible(), true);
+    assert.equal(await later.getByText("Unavailable", { exact: true }).isVisible(), true);
+    assert.equal(await laterSplit.count(), 0);
+    update({ forecastDurations: undefined, progress: 75 });
+    await page.locator('progress[aria-label="Delivery progress"][value="75"]').waitFor();
+    assert.equal(await expectedSplit.count(), 0);
+    assert.equal(await laterSplit.count(), 0);
+    assert.equal(await later.locator("time").getAttribute("datetime") !== null, true);
   } finally {
     forecastSessions.delete(session);
     await page.close();

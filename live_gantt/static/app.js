@@ -1745,6 +1745,38 @@ function renderCriticalPathDetails(milestone, steps, largest, open, focusedTask)
   return { details, focus };
 }
 
+function forecastDurations(milestone, key) {
+  const times = milestone.forecastDurations?.[key];
+  if (timestamp(milestone[key]) === null || !times) return null;
+  return [times.workMs, times.quotaWaitMs].every(value => Number.isFinite(value) && value >= 0)
+    ? times : null;
+}
+
+function renderForecastDurations(times, title) {
+  const group = node("fieldset", "forecast-breakdown");
+  const legend = node("legend", "", "At last forecast");
+  legend.prepend(node("span", "visually-hidden", `${title} · `));
+  group.title = "Projected time on the path that determines this finish, as of the last forecast.";
+  const bar = node("div", "forecast-composition");
+  bar.setAttribute("aria-hidden", "true");
+  const amounts = node("dl", "forecast-durations");
+  for (const [style, label, milliseconds] of [
+    ["forecast-work", "Active work", times.workMs], ["forecast-wait", "Quota wait", times.quotaWaitMs],
+  ]) {
+    if (milliseconds > 0) {
+      const segment = node("span", style);
+      segment.style.flexGrow = String(milliseconds);
+      bar.append(segment);
+    }
+    const row = node("div", style);
+    const value = milliseconds > 0 && milliseconds < MINUTE ? "<1 min" : duration(milliseconds);
+    row.append(node("dt", "", label), node("dd", "", value));
+    amounts.append(row);
+  }
+  group.append(legend, bar, amounts);
+  return group;
+}
+
 function renderMilestones(now) {
   const focused = document.activeElement?.closest(".finish-history");
   const criticalControl = document.activeElement;
@@ -1788,6 +1820,8 @@ function renderMilestones(now) {
       const remaining = key === "p50" ? node("span", "forecast-remaining") : null;
       field.append(node("span", "forecast-label", title), value);
       if (remaining) field.append(remaining);
+      const durations = forecastDurations(milestone, key);
+      if (durations) field.append(renderForecastDurations(durations, title));
       measures.append(field);
       state.milestoneDates.push({ node: value, remaining, milestone, key });
     }
@@ -1816,21 +1850,24 @@ function renderMilestones(now) {
     }
     if (steps.length) {
       const waits = steps.flatMap(step => step.waits);
-      const quotaWait = waits.reduce((total, delay) => total + delay.duration, 0);
+      const legacyForecast = !Object.hasOwn(milestone, "forecastDurations");
+      const quotaWait = legacyForecast ? waits.reduce((total, delay) => total + delay.duration, 0)
+        : forecastDurations(milestone, "p50")?.quotaWaitMs;
       if (quotaWait > 0) {
-        const totalWork = steps.reduce((total, step) => total + step.work, 0);
-        const breakdown = node("div", "critical-path-share",
-          `${hours(totalWork / HOUR)} work · ${hours(quotaWait / HOUR)} projected quota wait`);
         const waitShare = quotaWait / timeUntilFinish;
+        let waitPanel = card;
         if (waitShare > HALF_OF_FORECAST) {
-          const panel = node("div", "milestone-quota-wait");
-          panel.append(node("strong", "", `Quota wait accounts for ${percent(waitShare * PERCENT_SCALE)} of time until expected finish`), breakdown);
+          waitPanel = node("div", "milestone-quota-wait");
+          waitPanel.append(node("strong", "", `Quota wait accounts for ${percent(waitShare * PERCENT_SCALE)} of time until expected finish`));
           for (const source of new Set(waits.map(delay => delay.source))) {
-            panel.append(node("span", "critical-path-share", source));
+            waitPanel.append(node("span", "critical-path-share", source));
           }
-          measures.after(panel);
-        } else {
-          card.append(breakdown);
+          measures.after(waitPanel);
+        }
+        if (legacyForecast) {
+          const totalWork = steps.reduce((total, step) => total + step.work, 0);
+          waitPanel.append(node("div", "critical-path-share",
+            `${hours(totalWork / HOUR)} work · ${hours(quotaWait / HOUR)} projected quota wait`));
         }
       }
       const { details, focus } = renderCriticalPathDetails(milestone, steps, contribution,
