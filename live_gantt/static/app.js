@@ -34,9 +34,13 @@ const EXPANDED_STORAGE_KEY = "live-gantt.expanded";
 const FINISH_HISTORY_KEY = "live-gantt.finish-history";
 const MAX_FINISH_OBSERVATIONS = 2048;
 const FINISH_SAMPLE_INTERVAL = 5 * MINUTE;
+const FINISH_GAP_INTERVAL = 2 * FINISH_SAMPLE_INTERVAL;
+const FINISH_AXIS_INTERVALS = 3;
 const DATE_FORMAT_OPTIONS = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
 const dateFormat = new Intl.DateTimeFormat(undefined, DATE_FORMAT_OPTIONS);
 const preciseDateFormat = new Intl.DateTimeFormat(undefined, { ...DATE_FORMAT_OPTIONS, second: "2-digit" });
+const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
 const SESSION_HASH_PREFIX = "#session=";
@@ -49,6 +53,7 @@ const AGE_UNITS = [[DAY, "d"], [HOUR, "h"], [MINUTE, "min"]];
 const FOLDED_DISCLOSURE = "\u25b8";
 const EXPANDED_DISCLOSURE = "\u25be";
 const TICK_STEPS = [15 * MINUTE, 30 * MINUTE, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
+const FINISH_TICK_STEPS = [5 * MINUTE, ...TICK_STEPS];
 const ZOOMS = {
   "12h": { span: 12 * HOUR, pixels: 1008 },
   "3d": { span: 3 * DAY, pixels: 1440 },
@@ -117,7 +122,9 @@ const state = {
   tracks: [],
   milestoneDates: [],
   finishHistory: savedFinishHistory(),
-  finishDetails: new Map(),
+  finishViews: new Map(),
+  finishName: null,
+  selectedObservation: null,
   finishHistoryVolatile: false,
   detailsOpen: false,
   detailKey: null,
@@ -166,8 +173,7 @@ function dateTime(value, full = false) {
 
 function forecastTime(time, now) {
   if (new Date(time).toDateString() !== new Date(now).toDateString()) return dateTime(time);
-  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(time);
-  return `Today, ${clock}`;
+  return `Today, ${clockFormat.format(time)}`;
 }
 
 function titleCase(value) {
@@ -209,7 +215,7 @@ function observeFinishes(model) {
   function keepInTab() {
     state.finishHistoryVolatile = true;
     state.finishHistory = appendFinishSamples(state.finishHistory, samples);
-    refreshFinishDetails();
+    refreshFinishHistory();
   }
   if (state.finishHistoryVolatile || !navigator.locks) return keepInTab();
   navigator.locks.request(FINISH_HISTORY_KEY, () => {
@@ -217,7 +223,7 @@ function observeFinishes(model) {
     const merged = appendFinishSamples(stored, samples);
     if (merged !== stored) localStorage.setItem(FINISH_HISTORY_KEY, JSON.stringify(merged));
     state.finishHistory = merged;
-    refreshFinishDetails();
+    refreshFinishHistory();
   }).catch(keepInTab);
 }
 
@@ -576,7 +582,9 @@ function resetSession(id) {
   state.selected = id;
   if (id !== null || hadSelection) linkSession(id);
   state.model = null;
-  state.finishDetails.clear();
+  if (finish.dialog.open) finish.dialog.close();
+  state.finishName = null;
+  state.finishViews.clear();
   state.monitor = null;
   state.monitorReceivedAt = null;
   state.follow = true;
@@ -1332,89 +1340,229 @@ function historyTime(time) {
   return value;
 }
 
-function drawFinishHistory(content, samples) {
-  const oldScroll = content.querySelector(".finish-table")?.scrollTop || 0;
-  const coverage = state.finishHistoryVolatile ? "History is available for this tab only." : "Forecasts observed in this browser.";
-  content.replaceChildren(node("p", "", samples.length ? coverage : "Waiting for the first forecast snapshot."));
-  if (!samples.length) return;
+const finish = Object.fromEntries([
+  "dialog", "name", "y-caption", "y-axis", "plot", "series", "cursor", "point", "empty",
+  "x-axis", "x-caption", "observed", "expected", "shift", "values", "rows", "note",
+].map(key => [key, document.getElementById(`finish-${key}`)]));
+
+function finishSeries(samples) {
   const known = samples.filter(sample => sample.finish !== null);
-  if (known.length > 1) {
-    const times = known.map(sample => sample.finish);
-    const earliest = Math.min(...times);
-    const latest = Math.max(...times);
-    const first = samples[0].at;
-    const last = samples.at(-1).at;
-    const plot = node("div", "finish-plot");
-    plot.setAttribute("role", "img");
-    plot.setAttribute("aria-label", `Expected finishes from ${dateTime(earliest)} to ${dateTime(latest)}, observations in the table below.`);
-    for (const sample of known) {
-      const dot = node("i");
-      dot.style.left = `${PERCENT_SCALE * (sample.at - first) / (last - first)}%`;
-      dot.style.bottom = earliest === latest ? "50%" : `${PERCENT_SCALE * (sample.finish - earliest) / (latest - earliest)}%`;
-      dot.title = `${dateTime(sample.at, true)} → ${dateTime(sample.finish, true)}`;
-      plot.append(dot);
+  const estimates = known.map(sample => sample.finish);
+  const low = estimates.length ? Math.min(...estimates) : 0;
+  const high = estimates.length ? Math.max(...estimates) : 0;
+  const desiredStep = (high - low) / FINISH_AXIS_INTERVALS;
+  const step = FINISH_TICK_STEPS.find(interval => interval >= desiredStep) || Math.ceil(desiredStep / DAY) * DAY;
+  const floor = Math.floor(low / step) * step;
+  const ceiling = Math.max(floor + 2 * step, Math.ceil(high / step) * step);
+  const top = time => PERCENT_SCALE * (ceiling - time) / (ceiling - floor);
+  const ticks = [];
+  if (known.length) {
+    for (let time = floor; time <= ceiling; time += step) {
+      if (Number.isFinite(new Date(time).getTime())) ticks.push({ time, y: top(time) });
     }
-    const chart = node("div", "finish-chart");
-    chart.append(node("span", "finish-bound", dateTime(latest)), plot, node("span", "finish-bound", dateTime(earliest)));
-    const axis = node("div", "finish-axis");
-    axis.append(historyTime(first), historyTime(last));
-    content.append(chart, axis);
   }
-  const scroll = node("div", "finish-table");
-  const table = node("table");
-  const head = table.createTHead().insertRow();
-  for (const label of ["Observed", "Expected finish"]) head.append(node("th", "", label));
-  const body = table.createTBody();
-  for (const sample of samples.slice().reverse()) {
-    const row = body.insertRow();
-    row.insertCell().append(historyTime(sample.at));
-    row.insertCell().append(sample.finish === null ? "Unknown" : historyTime(sample.finish));
+  const start = samples[0]?.at;
+  const end = samples.at(-1)?.at;
+  const points = samples.map(sample => ({
+    ...sample, x: end === start ? PERCENT_SCALE / 2 : PERCENT_SCALE * (sample.at - start) / (end - start),
+    y: sample.finish === null ? null : top(sample.finish),
+  }));
+  const runs = [];
+  let previous;
+  for (const point of points) {
+    if (point.y !== null) {
+      if (previous?.y == null || point.at - previous.at > FINISH_GAP_INTERVAL) runs.push([]);
+      runs.at(-1).push(point);
+    }
+    previous = point;
   }
-  scroll.append(table);
-  content.append(scroll);
-  scroll.scrollTop = oldScroll;
+  const lines = runs.map(run => "M" + run.map(point => `${point.x},${point.y}`).join("L"));
+  const areas = runs.map((run, index) =>
+    `${lines[index]}V${PERCENT_SCALE}H${run[0].x}Z`);
+  return { points, ticks, line: lines.join(""), area: areas.join(""), first: points.find(point => point.y !== null),
+    hasGaps: runs.length > 1 || known.length < samples.length };
 }
 
-function refreshFinishDetails() {
-  for (const [name, details] of state.finishDetails) {
-    if (details.history === state.finishHistory) continue;
-    details.history = state.finishHistory;
-    details.samples = state.finishHistory.filter(sample => sample.session === state.selected && sample.name === name);
-    let delta = "";
-    const first = details.samples.find(sample => sample.finish !== null);
-    const latest = details.samples.at(-1)?.finish;
-    if (first && latest != null) {
-      const minutes = Math.round((latest - first.finish) / MINUTE);
-      if (minutes) delta = ` · ${duration(Math.abs(minutes) * MINUTE)} ${minutes < 0 ? "earlier" : "later"}`;
-    }
-    details.change.textContent = delta;
-    details.change.title = "Change from the first retained estimate";
-    if (details.element.open) drawFinishHistory(details.content, details.samples);
+function drawFinishSeries(svg, series, preview = false) {
+  const paths = [];
+  function path(className, d) {
+    if (!d) return;
+    const element = document.createElementNS(svg.namespaceURI, "path");
+    element.setAttribute("class", className);
+    element.setAttribute("d", d);
+    paths.push(element);
+  }
+  if (!preview) path("finish-grid", series.ticks.map(tick => `M0,${tick.y}H${PERCENT_SCALE}`).join(""));
+  path("finish-area", series.area);
+  if (series.first) path("finish-baseline", `M0,${series.first.y}H${PERCENT_SCALE}`);
+  path("finish-line", series.line);
+  path("finish-marks", series.points.filter(point => point.y !== null).map(point => `M${point.x},${point.y}h0`).join(""));
+  if (!preview) path("finish-unknown", series.points.filter(point => point.y === null).map(point =>
+    `M${point.x},${PERCENT_SCALE}v-3`).join(""));
+  svg.replaceChildren(...paths);
+}
+
+function forecastShift(first, time) {
+  if (!first || time == null) return "Unknown";
+  const minutes = Math.floor(time / MINUTE) - Math.floor(first.finish / MINUTE);
+  return minutes ? `${duration(Math.abs(minutes) * MINUTE)} ${minutes < 0 ? "earlier" : "later"}` : "Unchanged";
+}
+
+function inspectedSeries() {
+  return state.finishViews.get(state.finishName)?.series;
+}
+
+function paintFinishSelection(series) {
+  const { points } = series;
+  let index = points.findIndex(point => point.at === state.selectedObservation);
+  if (index < 0) index = points.length - 1;
+  const point = points[index];
+  finish.cursor.hidden = !point;
+  finish.point.hidden = point?.y == null;
+  finish.plot.setAttribute("aria-valuemax", String(Math.max(1, points.length)));
+  finish.plot.setAttribute("aria-valuenow", String(Math.max(1, index + 1)));
+  finish.plot.setAttribute("aria-disabled", String(!point));
+  finish.plot.setAttribute("aria-valuetext", point
+    ? `Observed ${dateTime(point.at, true)}, expected finish ${dateTime(point.finish, true)}`
+    : "No observations");
+  finish.observed.replaceChildren(point ? historyTime(point.at) : "Unavailable");
+  finish.expected.replaceChildren(point?.finish != null ? historyTime(point.finish) : "Unknown");
+  finish.shift.textContent = forecastShift(series.first, point?.finish);
+  if (point) {
+    finish.cursor.style.left = `${point.x}%`;
+    finish.point.style.left = `${point.x}%`;
+    if (point.y !== null) finish.point.style.top = `${point.y}%`;
   }
 }
 
-function finishDisclosure(name, completed = false) {
-  if (!state.finishDetails.has(name)) {
-    const element = node("details", "compact-disclosure finish-history");
-    const summary = node("summary");
-    const content = node("div", "disclosure-content");
-    const label = node("span");
+function paintFinishRows() {
+  if (!finish.dialog.open || !finish.values.open) return;
+  const rows = (inspectedSeries()?.points || []).slice().reverse().map(point => {
+    const row = node("tr");
+    row.insertCell().append(historyTime(point.at));
+    row.insertCell().append(point.finish === null ? "Unknown" : historyTime(point.finish));
+    return row;
+  });
+  finish.rows.replaceChildren(...rows);
+}
+
+function paintFinishChart(series) {
+  const times = series.points.map(point => point.at);
+  const first = times[0];
+  const last = times.at(-1);
+  const yDates = series.ticks.map(tick => tick.time);
+  const singleDay = dates => dates.length && new Date(dates[0]).toDateString() === new Date(dates.at(-1)).toDateString();
+  const axisCaption = (label, dates) => singleDay(dates) ? `${label} · ${dayFormat.format(dates[0])}` : label;
+  const axisLabel = (time, dates) => singleDay(dates) ? clockFormat.format(time) : dateTime(time);
+  finish["y-caption"].textContent = axisCaption("Expected finish", yDates);
+  finish["y-axis"].replaceChildren(...series.ticks.map(tick => {
+    const label = node("span", "", axisLabel(tick.time, yDates));
+    label.style.top = `${tick.y}%`;
+    return label;
+  }));
+  const xTicks = times.length > 1 ? [first, last] : times;
+  if (last - first >= FINISH_SAMPLE_INTERVAL) xTicks.splice(1, 0, first + (last - first) / 2);
+  finish["x-axis"].replaceChildren(...xTicks.map(time => node("span", "", axisLabel(time, times))));
+  finish["x-caption"].textContent = axisCaption("Observation time", times);
+  finish.empty.hidden = Boolean(series.first);
+  finish.empty.textContent = times.length ? "No known finish estimate" : "Waiting for the first observation";
+  const notes = [];
+  if (series.hasGaps) notes.push(`Breaks mark unknown estimates or observations more than ${duration(FINISH_GAP_INTERVAL)} apart.`);
+  if (state.finishHistoryVolatile) notes.push("History is available for this tab only.");
+  finish.note.textContent = notes.join(" ");
+  finish.note.hidden = !notes.length;
+  drawFinishSeries(finish.series, series);
+  paintFinishSelection(series);
+  paintFinishRows();
+}
+
+function refreshFinishHistory() {
+  for (const [name, view] of state.finishViews) {
+    if (view.history === state.finishHistory) continue;
+    view.history = state.finishHistory;
+    const samples = state.finishHistory.filter(sample => sample.session === state.selected && sample.name === name);
+    view.series = finishSeries(samples);
+    drawFinishSeries(view.preview, view.series, true);
+    const latest = samples.at(-1);
+    view.change.textContent = samples.length > 1 ? forecastShift(view.series.first, latest.finish) : plural(samples.length, "observation");
+    view.change.title = "Change from the first retained forecast";
+    if (finish.dialog.open && name === state.finishName) paintFinishChart(view.series);
+  }
+}
+
+function finishButton(name, completed = false) {
+  if (!state.finishViews.has(name)) {
+    const button = node("button", "finish-history");
+    button.type = "button";
+    button.setAttribute("aria-label", `${name} finish history`);
+    button.setAttribute("aria-haspopup", "dialog");
+    const copy = node("span", "finish-button-copy");
+    const label = node("strong");
     const change = node("span", "finish-change");
-    summary.append(label, change);
-    const details = { element, summary, label, change, content, samples: [] };
-    element.append(summary, content);
-    element.addEventListener("toggle", () => {
-      if (element.open) drawFinishHistory(content, details.samples);
+    copy.append(label, change);
+    const preview = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    preview.setAttribute("class", "finish-preview");
+    preview.setAttribute("viewBox", finish.series.getAttribute("viewBox"));
+    preview.setAttribute("preserveAspectRatio", "none");
+    preview.setAttribute("aria-hidden", "true");
+    button.append(copy, preview);
+    const view = { button, label, change, preview };
+    button.addEventListener("click", () => {
+      state.finishName = name;
+      state.selectedObservation = null;
+      finish.name.textContent = name;
+      finish.dialog.setAttribute("aria-label", button.getAttribute("aria-label"));
+      finish.values.open = false;
+      finish.rows.replaceChildren();
+      finish.dialog.showModal();
+      paintFinishChart(view.series);
+      finish.plot.focus({ preventScroll: true });
     });
-    state.finishDetails.set(name, details);
+    state.finishViews.set(name, view);
   }
-  const details = state.finishDetails.get(name);
-  details.label.textContent = completed ? `${name} · Finish history` : "Finish history";
-  return details.element;
+  const view = state.finishViews.get(name);
+  view.label.textContent = completed ? `${name} · Finish history` : "Finish history";
+  return view.button;
 }
+
+finish.values.addEventListener("toggle", paintFinishRows);
+finish.dialog.addEventListener("keydown", event => event.stopPropagation());
+finish.dialog.addEventListener("close", () => {
+  if (finish.dialog.open) return;
+  state.finishViews.get(state.finishName)?.button.focus({ preventScroll: true });
+  state.finishName = null;
+  state.selectedObservation = null;
+});
+finish.plot.addEventListener("keydown", event => {
+  const series = inspectedSeries();
+  if (!series?.points.length) return;
+  const last = series.points.length - 1;
+  const selected = series.points.findIndex(point => point.at === state.selectedObservation);
+  const index = selected < 0 ? last : selected;
+  const previous = Math.max(0, index - 1);
+  const next = Math.min(last, index + 1);
+  const positions = { ArrowLeft: previous, ArrowDown: previous, ArrowRight: next, ArrowUp: next, Home: 0, End: last };
+  if (!Object.hasOwn(positions, event.key)) return;
+  event.preventDefault();
+  state.selectedObservation = series.points[positions[event.key]].at;
+  paintFinishSelection(series);
+});
+function inspectAtPointer(event) {
+  const series = inspectedSeries();
+  if (!series?.points.length) return;
+  const bounds = finish.plot.getBoundingClientRect();
+  const x = PERCENT_SCALE * (event.clientX - bounds.left) / bounds.width;
+  const nearest = series.points.reduce((best, point) => Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best);
+  if (state.selectedObservation !== nearest.at) {
+    state.selectedObservation = nearest.at;
+    paintFinishSelection(series);
+  }
+}
+finish.plot.addEventListener("pointerdown", inspectAtPointer);
+finish.plot.addEventListener("pointermove", inspectAtPointer);
 
 function renderMilestones(now) {
-  const focused = document.activeElement?.closest(".finish-history")?.querySelector("summary");
+  const focused = document.activeElement?.closest(".finish-history");
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
   const cards = node("div", "milestone-cards");
@@ -1458,14 +1606,14 @@ function renderMilestones(now) {
         ? "Forecast unavailable. Review the plan for missing estimates or unresolved dependencies."
         : "Needs estimates. Ask your coding agent to estimate the remaining tasks."));
     }
-    card.append(finishDisclosure(name));
+    card.append(finishButton(name));
     cards.append(card);
   }
   if (cards.childElementCount) elements.milestones.append(cards);
   if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.map(item => item.name).join(", ")}`));
   for (const milestone of done) {
     if (state.finishHistory.some(sample => sample.session === state.selected && sample.name === milestone.name)) {
-      elements.milestones.append(finishDisclosure(milestone.name, true));
+      elements.milestones.append(finishButton(milestone.name, true));
     }
   }
   if (!milestones.length) {
@@ -1476,7 +1624,7 @@ function renderMilestones(now) {
       ? "Agent activity is shown below. Add planned tasks with estimates to get progress and finish forecasts."
       : "Add planned tasks with estimates to see progress and a finish forecast."));
   }
-  refreshFinishDetails();
+  refreshFinishHistory();
   if (focused?.isConnected) focused.focus({ preventScroll: true });
   paintMilestones(now);
 }
