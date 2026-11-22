@@ -650,6 +650,70 @@ test("finish history keeps observed revisions, unknown estimates and completed m
   }
 });
 
+for (const viewport of [DESKTOP_VIEWPORT, MOBILE_VIEWPORT]) {
+  test(`long timeline labels stay readable and bars stay centered at ${viewport.width}px`, async () => {
+    const page = await browser.newPage({ viewport });
+    const session = "long-timeline-label";
+    const { model } = fixture();
+    const [first, second] = model.tasks;
+    const subject = "Verify the published documentation against the package registry and record the release evidence for the next handoff";
+    const marker = "Review the release artifact and confirm that its recorded checks cover the supported platforms";
+    const task = {
+      ...first, subject, queued: true, waitingFor: [second.id], markers: [marker],
+      runs: [{ label: "Release verification", started: model.now, status: "running" }],
+    };
+    const short = { ...second, subject: "Build release", milestone: task.milestone };
+    const feed = { model: { ...model, id: session, tasks: [task, short], milestones: [] } };
+    try {
+      forecastSessions.set(session, feed);
+      await page.goto(address.replace(SESSION_ID, session));
+      const main = page.getByRole("button", { name: new RegExp(`^Task ${task.id}: ${subject}`) });
+      await main.waitFor();
+      const row = page.locator(".timeline-row").filter({ has: main });
+      const title = main.locator(".task-title");
+      assert.equal(await title.textContent(), `#${task.id} ${subject}`);
+      const status = main.getByText(`Queued · after #${second.id} · ${marker}`, { exact: true });
+      for (const [text, locator] of [["Task title", title], ["Task status", status]]) {
+        assert.ok(await locator.isVisible(), `${text} must be visible`);
+        const geometry = await locator.evaluate((element, tolerance) => {
+          const textRange = document.createRange();
+          textRange.selectNodeContents(element);
+          const fragments = [...textRange.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
+          const containers = [element, element.closest(".task-main"), element.closest(".row-label")];
+          const clippedBy = containers.filter(container => {
+            const box = container.getBoundingClientRect();
+            return fragments.some(rect => rect.left < box.left - tolerance || rect.right > box.right + tolerance
+              || rect.top < box.top - tolerance || rect.bottom > box.bottom + tolerance);
+          }).map(container => container.className);
+          return { fragments: fragments.length, clippedBy };
+        }, GEOMETRY_TOLERANCE);
+        assert.ok(geometry.fragments > 0, `${text} must occupy visible space`);
+        assert.deepEqual(geometry.clippedBy, [], `${text} must fit without clipping`);
+      }
+      const rowBox = await row.boundingBox();
+      const shortMain = page.getByRole("button", { name: new RegExp(`^Task ${short.id}: ${short.subject}`) });
+      const shortBox = await page.locator(".timeline-row").filter({ has: shortMain }).boundingBox();
+      assert.ok(rowBox.height > shortBox.height, "The timeline row must grow with its label");
+      const bar = await row.locator(".bar.projected").boundingBox();
+      const barCenter = bar.y + bar.height / 2;
+      const rowCenter = rowBox.y + rowBox.height / 2;
+      assert.ok(Math.abs(barCenter - rowCenter) <= GEOMETRY_TOLERANCE, "The bar must remain vertically centered in its row");
+
+      const toggle = row.getByRole("button", { name: `Show all 1 run for task ${task.id}` });
+      await toggle.click();
+      await page.getByRole("button", { name: /Release verification/ }).waitFor();
+      await main.click();
+      const close = page.getByRole("button", { name: "Close details" });
+      await close.click();
+      assert.ok(await main.evaluate(element => document.activeElement === element), "Closing details must return focus to the task");
+      await assertFixedDocument(page, viewport);
+    } finally {
+      forecastSessions.delete(session);
+      await page.close();
+    }
+  });
+}
+
 for (const viewport of VIEWPORTS) {
   const dimensions = `${viewport.width}x${viewport.height}`;
   for (const [name, selector] of DISCLOSURES) {
