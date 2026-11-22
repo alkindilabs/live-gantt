@@ -65,6 +65,36 @@ class SourceStoreTests(unittest.TestCase):
     def state(self):
         return self.store.state(self.list_id, self.now)
 
+    def test_command_timings_combine_distinct_session_and_agent_calls(self):
+        timestamp = "2026-10-15T10:00:00Z"
+        call = self.tool(timestamp, "Bash", {"command": "git status private-path"})
+        result = self.result("2026-10-15T10:00:02Z", "private output")
+        self.append(call, result, call, result,
+                    self.tool(timestamp, "Bash", {"command": "git status", "run_in_background": True}, "background"),
+                    self.result("2026-10-15T10:00:02Z", "", "background"),
+                    self.tool(timestamp, "Bash", {"command": "git status"}, "yielded"),
+                    {**self.result("2026-10-15T10:00:02Z", "", "yielded"),
+                     "toolUseResult": {"backgroundTaskId": "task-id"}},
+                    self.tool(timestamp, "Bash", {"command": "git status"}, "pending"))
+        self.agent("a1111111111111111", call, self.result("2026-10-15T10:00:03Z", ""))
+        self.workflow("wf_one", [], {"worker": (
+            "Check", "review", [call, self.result("2026-10-15T10:00:04Z", "")],
+        )})
+        untimestamped = self.tool(timestamp, "Bash", {"command": "git status", "timestamp": timestamp}, "replay")
+        del untimestamped["timestamp"]
+        self.append(untimestamped, self.result("2026-10-15T10:00:08Z", "", "replay"),
+                    self.tool(timestamp, "Bash", {"command": "git status"}, ["invalid"]),
+                    self.result("2026-10-15T10:00:08Z", "", ["invalid"]))
+        self.assertEqual(self.state()["commandTimings"], {
+            "operations": [{"label": "git status", "calls": 3, "totalMs": 9000, "longestMs": 4000}],
+            "unmeasured": 3,
+        })
+        self.append(self.result("2026-10-15T10:00:01Z", "", "pending"))
+        self.assertEqual(self.state()["commandTimings"], {
+            "operations": [{"label": "git status", "calls": 4, "totalMs": 10000, "longestMs": 4000}],
+            "unmeasured": 2,
+        })
+
     def test_runtime_activity_ignores_metadata_accounting_and_malformed_records(self):
         self.append({"type": "user", "timestamp": "2026-10-15T09:00:00Z", "message": {"content": "Please build it"}})
         first = self.state()["_runtime"]
