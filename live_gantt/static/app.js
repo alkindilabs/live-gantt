@@ -31,6 +31,12 @@ const DESIRED_TICK_WIDTH = 100;
 const DEFAULT_ZOOM = "12h";
 const ZOOM_STORAGE_KEY = "live-gantt.zoom";
 const EXPANDED_STORAGE_KEY = "live-gantt.expanded";
+const FINISH_HISTORY_KEY = "live-gantt.finish-history";
+const MAX_FINISH_OBSERVATIONS = 2048;
+const FINISH_SAMPLE_INTERVAL = 5 * MINUTE;
+const DATE_FORMAT_OPTIONS = { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+const dateFormat = new Intl.DateTimeFormat(undefined, DATE_FORMAT_OPTIONS);
+const preciseDateFormat = new Intl.DateTimeFormat(undefined, { ...DATE_FORMAT_OPTIONS, second: "2-digit" });
 const RECENTLY_FINISHED_WINDOW = 2 * HOUR;
 const LIVE_AGENT_STATUSES = new Set(["running", "silent"]);
 const SESSION_HASH_PREFIX = "#session=";
@@ -63,6 +69,17 @@ function savedExpanded() {
     if (Array.isArray(keys)) return new Set(keys.filter(key => typeof key === "string"));
   } catch {}
   return new Set();
+}
+
+function savedFinishHistory() {
+  try {
+    const records = JSON.parse(localStorage.getItem(FINISH_HISTORY_KEY));
+    if (Array.isArray(records)) return records.slice(-MAX_FINISH_OBSERVATIONS).filter(sample =>
+      typeof sample?.session === "string" && typeof sample.name === "string" &&
+      Number.isFinite(sample.at) && Number.isFinite(new Date(sample.at).getTime()) &&
+      (sample.finish === null || (Number.isFinite(sample.finish) && Number.isFinite(new Date(sample.finish).getTime()))));
+  } catch {}
+  return [];
 }
 
 const elements = Object.fromEntries(
@@ -99,6 +116,9 @@ const state = {
   lastScrollLeft: 0,
   tracks: [],
   milestoneDates: [],
+  finishHistory: savedFinishHistory(),
+  finishDetails: new Map(),
+  finishHistoryVolatile: false,
   detailsOpen: false,
   detailKey: null,
   detailEntries: new Map(),
@@ -141,9 +161,7 @@ function duration(milliseconds) {
 function dateTime(value, full = false) {
   const time = typeof value === "number" ? value : timestamp(value);
   if (time === null) return "Unknown";
-  return new Intl.DateTimeFormat(undefined, full
-    ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }
-    : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(time);
+  return (full ? preciseDateFormat : dateFormat).format(time);
 }
 
 function forecastTime(time, now) {
@@ -163,6 +181,44 @@ function modelAge(now) {
 function projectedTime(value, now, anchored = false) {
   const result = timestamp(value);
   return result === null ? null : result + (anchored ? 0 : modelAge(now));
+}
+
+function appendFinishSamples(history, samples) {
+  const latest = new Map();
+  for (const record of history) {
+    if (record.session === samples[0].session) latest.set(record.name, record);
+  }
+  const changes = samples.filter(sample => {
+    const last = latest.get(sample.name);
+    if (!last) return true;
+    if (sample.at <= last.at) return false;
+    if (sample.finish === null || last.finish === null) return sample.finish !== last.finish;
+    return Math.floor(sample.finish / MINUTE) !== Math.floor(last.finish / MINUTE)
+      || sample.at - last.at >= FINISH_SAMPLE_INTERVAL;
+  });
+  return changes.length ? history.concat(changes).slice(-MAX_FINISH_OBSERVATIONS) : history;
+}
+
+function observeFinishes(model) {
+  const at = timestamp(model.observedAt);
+  if (model.sync?.status !== "current" || at === null || document.hidden) return;
+  const samples = (model.milestones || []).filter(milestone => milestone.hasRemaining).map(milestone => ({
+    session: state.selected, name: milestone.name, at, finish: timestamp(milestone.p50),
+  }));
+  if (!samples.length || appendFinishSamples(state.finishHistory, samples) === state.finishHistory) return;
+  function keepInTab() {
+    state.finishHistoryVolatile = true;
+    state.finishHistory = appendFinishSamples(state.finishHistory, samples);
+    refreshFinishDetails();
+  }
+  if (state.finishHistoryVolatile || !navigator.locks) return keepInTab();
+  navigator.locks.request(FINISH_HISTORY_KEY, () => {
+    const stored = savedFinishHistory();
+    const merged = appendFinishSamples(stored, samples);
+    if (merged !== stored) localStorage.setItem(FINISH_HISTORY_KEY, JSON.stringify(merged));
+    state.finishHistory = merged;
+    refreshFinishDetails();
+  }).catch(keepInTab);
 }
 
 function taskSegments(task, now) {
@@ -520,6 +576,7 @@ function resetSession(id) {
   state.selected = id;
   if (id !== null || hadSelection) linkSession(id);
   state.model = null;
+  state.finishDetails.clear();
   state.monitor = null;
   state.monitorReceivedAt = null;
   state.follow = true;
@@ -567,6 +624,7 @@ function connectStream() {
       state.model = model;
       state.sync = model.sync;
       state.liveness = model.liveness;
+      observeFinishes(model);
       receiveMonitor(model.monitor);
       renderLists(state.lists);
       renderModel();
@@ -1267,7 +1325,96 @@ function renderForecastHealth() {
   health.classList.toggle("is-warning", Boolean(state.model && stale));
 }
 
+function historyTime(time) {
+  const value = node("time", "", dateTime(time));
+  value.dateTime = new Date(time).toISOString();
+  value.title = dateTime(time, true);
+  return value;
+}
+
+function drawFinishHistory(content, samples) {
+  const oldScroll = content.querySelector(".finish-table")?.scrollTop || 0;
+  const coverage = state.finishHistoryVolatile ? "History is available for this tab only." : "Forecasts observed in this browser.";
+  content.replaceChildren(node("p", "", samples.length ? coverage : "Waiting for the first forecast snapshot."));
+  if (!samples.length) return;
+  const known = samples.filter(sample => sample.finish !== null);
+  if (known.length > 1) {
+    const times = known.map(sample => sample.finish);
+    const earliest = Math.min(...times);
+    const latest = Math.max(...times);
+    const first = samples[0].at;
+    const last = samples.at(-1).at;
+    const plot = node("div", "finish-plot");
+    plot.setAttribute("role", "img");
+    plot.setAttribute("aria-label", `Expected finishes from ${dateTime(earliest)} to ${dateTime(latest)}, observations in the table below.`);
+    for (const sample of known) {
+      const dot = node("i");
+      dot.style.left = `${PERCENT_SCALE * (sample.at - first) / (last - first)}%`;
+      dot.style.bottom = earliest === latest ? "50%" : `${PERCENT_SCALE * (sample.finish - earliest) / (latest - earliest)}%`;
+      dot.title = `${dateTime(sample.at, true)} → ${dateTime(sample.finish, true)}`;
+      plot.append(dot);
+    }
+    const chart = node("div", "finish-chart");
+    chart.append(node("span", "finish-bound", dateTime(latest)), plot, node("span", "finish-bound", dateTime(earliest)));
+    const axis = node("div", "finish-axis");
+    axis.append(historyTime(first), historyTime(last));
+    content.append(chart, axis);
+  }
+  const scroll = node("div", "finish-table");
+  const table = node("table");
+  const head = table.createTHead().insertRow();
+  for (const label of ["Observed", "Expected finish"]) head.append(node("th", "", label));
+  const body = table.createTBody();
+  for (const sample of samples.slice().reverse()) {
+    const row = body.insertRow();
+    row.insertCell().append(historyTime(sample.at));
+    row.insertCell().append(sample.finish === null ? "Unknown" : historyTime(sample.finish));
+  }
+  scroll.append(table);
+  content.append(scroll);
+  scroll.scrollTop = oldScroll;
+}
+
+function refreshFinishDetails() {
+  for (const [name, details] of state.finishDetails) {
+    if (details.history === state.finishHistory) continue;
+    details.history = state.finishHistory;
+    details.samples = state.finishHistory.filter(sample => sample.session === state.selected && sample.name === name);
+    let delta = "";
+    const first = details.samples.find(sample => sample.finish !== null);
+    const latest = details.samples.at(-1)?.finish;
+    if (first && latest != null) {
+      const minutes = Math.round((latest - first.finish) / MINUTE);
+      if (minutes) delta = ` · ${duration(Math.abs(minutes) * MINUTE)} ${minutes < 0 ? "earlier" : "later"}`;
+    }
+    details.change.textContent = delta;
+    details.change.title = "Change from the first retained estimate";
+    if (details.element.open) drawFinishHistory(details.content, details.samples);
+  }
+}
+
+function finishDisclosure(name, completed = false) {
+  if (!state.finishDetails.has(name)) {
+    const element = node("details", "compact-disclosure finish-history");
+    const summary = node("summary");
+    const content = node("div", "disclosure-content");
+    const label = node("span");
+    const change = node("span", "finish-change");
+    summary.append(label, change);
+    const details = { element, summary, label, change, content, samples: [] };
+    element.append(summary, content);
+    element.addEventListener("toggle", () => {
+      if (element.open) drawFinishHistory(content, details.samples);
+    });
+    state.finishDetails.set(name, details);
+  }
+  const details = state.finishDetails.get(name);
+  details.label.textContent = completed ? `${name} · Finish history` : "Finish history";
+  return details.element;
+}
+
 function renderMilestones(now) {
+  const focused = document.activeElement?.closest(".finish-history")?.querySelector("summary");
   elements.milestones.replaceChildren();
   state.milestoneDates = [];
   const cards = node("div", "milestone-cards");
@@ -1275,7 +1422,7 @@ function renderMilestones(now) {
   const milestones = state.model.milestones || [];
   for (const milestone of milestones) {
     if (!milestone.hasRemaining) {
-      done.push(milestone.name);
+      done.push(milestone);
       continue;
     }
     const name = milestone.name;
@@ -1311,10 +1458,16 @@ function renderMilestones(now) {
         ? "Forecast unavailable. Review the plan for missing estimates or unresolved dependencies."
         : "Needs estimates. Ask your coding agent to estimate the remaining tasks."));
     }
+    card.append(finishDisclosure(name));
     cards.append(card);
   }
   if (cards.childElementCount) elements.milestones.append(cards);
-  if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.join(", ")}`));
+  if (done.length) elements.milestones.append(node("p", "milestone-summary", `Completed milestones: ${done.map(item => item.name).join(", ")}`));
+  for (const milestone of done) {
+    if (state.finishHistory.some(sample => sample.session === state.selected && sample.name === milestone.name)) {
+      elements.milestones.append(finishDisclosure(milestone.name, true));
+    }
+  }
   if (!milestones.length) {
     const hasAgents = (state.model.agents || []).length || (state.model.workflows || []).length;
     elements.milestones.append(node("p", "overview-empty", state.model.provider === "codex"
@@ -1323,6 +1476,8 @@ function renderMilestones(now) {
       ? "Agent activity is shown below. Add planned tasks with estimates to get progress and finish forecasts."
       : "Add planned tasks with estimates to see progress and a finish forecast."));
   }
+  refreshFinishDetails();
+  if (focused?.isConnected) focused.focus({ preventScroll: true });
   paintMilestones(now);
 }
 
@@ -1589,6 +1744,12 @@ document.addEventListener("keydown", event => {
 });
 window.addEventListener("resize", () => {
   if (state.model) renderTimeline(Date.now(), state.follow);
+});
+window.addEventListener("storage", event => {
+  if (!state.finishHistoryVolatile && (event.key === FINISH_HISTORY_KEY || event.key === null)) {
+    state.finishHistory = savedFinishHistory();
+    if (state.model) renderMilestones(Date.now());
+  }
 });
 window.addEventListener("pagehide", () => {
   state.pageInactive = true;

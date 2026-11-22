@@ -38,6 +38,7 @@ let server;
 let browser;
 let address;
 const connections = new Set();
+const forecastSessions = new Map();
 
 function fixture() {
   const now = new Date().toISOString();
@@ -89,14 +90,17 @@ function fixture() {
 before(async () => {
   server = http.createServer(async (request, response) => {
     try {
-      const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+      const url = new URL(request.url, "http://127.0.0.1");
+      const pathname = url.pathname;
       const data = fixture();
       if (pathname === "/api/lists") {
         response.writeHead(200, { "Content-Type": "application/json" });
         response.end(JSON.stringify({ lists: [data.session] }));
       } else if (pathname === "/events") {
         response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
-        response.write(`event: state\ndata: ${JSON.stringify(data.model)}\n\n`);
+        const feed = forecastSessions.get(url.searchParams.get("list"));
+        if (feed) feed.response = response;
+        response.write(`event: state\ndata: ${JSON.stringify(feed?.model || data.model)}\n\n`);
         response.write(`event: usage\ndata: ${JSON.stringify(data.usage)}\n\n`);
       } else if (STATIC_ROUTES.has(pathname)) {
         const [filename, contentType] = STATIC_ROUTES.get(pathname);
@@ -147,6 +151,72 @@ async function assertFixedDocument(page, viewport) {
   assert.equal(dimensions.x, 0);
   assert.equal(dimensions.y, 0);
 }
+
+test("finish history keeps observed revisions, unknown estimates and completed milestone history across reloads", async () => {
+  const page = await browser.newPage({ viewport: VIEWPORTS[0] });
+  const session = "forecast-history";
+  const otherSession = "other-forecast-history";
+  const name = "Delivery";
+  const at = Date.now();
+  const minute = 60 * 1000;
+  const firstFinish = at + HOUR_MILLISECONDS;
+  const revisedFinish = firstFinish - 20 * minute;
+  const feed = {};
+  function update(offset, finish, remaining = true) {
+    const observedAt = new Date(at + offset).toISOString();
+    feed.model = { ...fixture().model, id: session, observedAt,
+      sync: { status: "current", checkedAt: observedAt },
+      milestones: [{ name, progress: remaining ? 25 : 100, hasRemaining: remaining,
+        hasEstimate: remaining, p50: finish === null ? null : new Date(finish).toISOString() }] };
+    feed.response?.write(`event: state\ndata: ${JSON.stringify(feed.model)}\n\n`);
+  }
+  try {
+    update(0, firstFinish);
+    forecastSessions.set(session, feed);
+    await page.goto(address.replace(SESSION_ID, session));
+    const history = page.locator("details").filter({ has: page.locator("summary", { hasText: "Finish history" }) });
+    const summary = history.locator("summary");
+    await summary.click({ timeout: 3000 });
+    const rows = history.locator("tbody tr");
+    const recorded = () => rows.evaluateAll(items => items.map(row =>
+      [...row.cells].map(cell => cell.querySelector("time")?.dateTime || cell.innerText)));
+    const iso = value => new Date(value).toISOString();
+    await rows.first().waitFor();
+    assert.deepEqual(await recorded(), [[iso(at), iso(firstFinish)]]);
+    await summary.focus();
+    feed.response.write(`event: heartbeat\ndata: ${JSON.stringify({
+      sync: { status: "current", checkedAt: iso(at + minute) },
+    })}\n\n`);
+    update(minute, revisedFinish);
+    await rows.nth(1).waitFor();
+    assert.match(await summary.innerText(), /20 min earlier/);
+    assert.equal(await summary.evaluate(el => el === document.activeElement), true);
+    update(2 * minute, null);
+    await rows.nth(2).waitFor();
+    update(3 * minute, revisedFinish);
+    await rows.nth(3).waitFor();
+    const expected = [[iso(at + 3 * minute), iso(revisedFinish)], [iso(at + 2 * minute), "Unknown"],
+      [iso(at + minute), iso(revisedFinish)], [iso(at), iso(firstFinish)]];
+    update(4 * minute, at + 4 * minute, false);
+    await page.getByText(/Completed milestones.*Delivery/).waitFor();
+    assert.deepEqual(await recorded(), expected);
+    await page.reload();
+    await summary.click({ timeout: 3000 });
+    await rows.nth(3).waitFor();
+    assert.deepEqual(await recorded(), expected);
+    forecastSessions.set(otherSession, { model: { ...feed.model, id: otherSession, title: "Other delivery plan",
+      milestones: [{ name, hasRemaining: true, hasEstimate: true, p50: iso(firstFinish) }] } });
+    await page.goto(address.replace(SESSION_ID, otherSession));
+    await page.locator("#session-title").filter({ hasText: "Other delivery plan" }).waitFor({ timeout: 3000 });
+    await summary.click();
+    await rows.first().waitFor();
+    assert.deepEqual(await recorded(), [[iso(at + 4 * minute), iso(firstFinish)]]);
+  } finally {
+    forecastSessions.delete(session);
+    forecastSessions.delete(otherSession);
+    await page.close();
+  }
+});
 
 for (const viewport of VIEWPORTS) {
   const dimensions = `${viewport.width}x${viewport.height}`;
